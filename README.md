@@ -21,6 +21,10 @@ Kronk provides a foundation for building autonomous AI agents with persistent me
 
 - **Local-First**: Agent state persists in a `.kronk/` folder with SQLite, optionally syncing to Turso cloud
 
+## Screenshots
+![Kronk CLI Screenshot](./assets/screenshot-main.png)
+![Kronk Chat Screenshot](./assets/screenshot-chat.png)
+
 ## Installation
 
 ```bash
