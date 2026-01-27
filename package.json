@@ -1,0 +1,42 @@
+{
+  "name": "kronk",
+  "version": "0.1.0",
+  "description": "An agentic AI framework with tiered memory architecture and vector search",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "kronk": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "bun test",
+    "lint": "eslint src/",
+    "kronk": "bun run src/cli.ts"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "llm",
+    "memory",
+    "vector-search",
+    "turso",
+    "libsql"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "commander": "^12.1.0",
+    "openai": "^4.70.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
