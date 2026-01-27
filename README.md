@@ -1,5 +1,7 @@
 # 🦾 Kronk
 
+![Kronk Logo](./Kronk_.webp)
+
 **An agentic AI framework with tiered memory architecture and vector search**
 
 Kronk provides a foundation for building autonomous AI agents with persistent memory, tool integration, and self-reflection capabilities. Built on TursoDB (libSQL) with native vector search support.
