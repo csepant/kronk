@@ -126,43 +126,77 @@ export class JournalManager {
    * Log a journal entry
    */
   async log(input: JournalInput): Promise<JournalEntry> {
-    // Generate embedding if provider is available
-    let embeddingBlob: string | null = null;
-    if (this.embedder) {
+    let sql: string;
+    let args: unknown[];
+
+    // Generate embedding if provider is available and vector search is enabled
+    if (this.embedder && this.db.isVectorSearchEnabled()) {
       const embedding = await this.embedder.embed(input.content);
-      embeddingBlob = `vector('[${embedding.join(',')}]')`;
+      const embeddingBlob = `vector('[${embedding.join(',')}]')`;
+
+      sql = `
+        INSERT INTO journal (
+          entry_type, content, embedding,
+          session_id, parent_id, tool_id, memory_ids,
+          input, output, duration_ms, tokens_used,
+          confidence, metadata
+        ) VALUES (
+          ?, ?, ${embeddingBlob},
+          ?, ?, ?, ?,
+          ?, ?, ?, ?,
+          ?, ?
+        )
+        RETURNING *
+      `;
+
+      args = [
+        input.entryType,
+        input.content,
+        input.sessionId ?? this.currentSessionId ?? null,
+        input.parentId ?? null,
+        input.toolId ?? null,
+        JSON.stringify(input.memoryIds ?? []),
+        input.input ?? null,
+        input.output ?? null,
+        input.durationMs ?? null,
+        input.tokensUsed ?? null,
+        input.confidence ?? null,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+      ];
+    } else {
+      // Text-only schema without embedding column
+      sql = `
+        INSERT INTO journal (
+          entry_type, content,
+          session_id, parent_id, tool_id, memory_ids,
+          input, output, duration_ms, tokens_used,
+          confidence, metadata
+        ) VALUES (
+          ?, ?,
+          ?, ?, ?, ?,
+          ?, ?, ?, ?,
+          ?, ?
+        )
+        RETURNING *
+      `;
+
+      args = [
+        input.entryType,
+        input.content,
+        input.sessionId ?? this.currentSessionId ?? null,
+        input.parentId ?? null,
+        input.toolId ?? null,
+        JSON.stringify(input.memoryIds ?? []),
+        input.input ?? null,
+        input.output ?? null,
+        input.durationMs ?? null,
+        input.tokensUsed ?? null,
+        input.confidence ?? null,
+        input.metadata ? JSON.stringify(input.metadata) : null,
+      ];
     }
 
-    const sql = `
-      INSERT INTO journal (
-        entry_type, content, embedding,
-        session_id, parent_id, tool_id, memory_ids,
-        input, output, duration_ms, tokens_used,
-        confidence, metadata
-      ) VALUES (
-        ?, ?, ${embeddingBlob ?? 'NULL'},
-        ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?
-      )
-      RETURNING *
-    `;
-
-    const result = await this.db.query(sql, [
-      input.entryType,
-      input.content,
-      input.sessionId ?? this.currentSessionId ?? null,
-      input.parentId ?? null,
-      input.toolId ?? null,
-      JSON.stringify(input.memoryIds ?? []),
-      input.input ?? null,
-      input.output ?? null,
-      input.durationMs ?? null,
-      input.tokensUsed ?? null,
-      input.confidence ?? null,
-      input.metadata ? JSON.stringify(input.metadata) : null,
-    ]);
-
+    const result = await this.db.query(sql, args);
     return this.rowToEntry(result.rows[0]);
   }
 
@@ -267,7 +301,7 @@ export class JournalManager {
   }
 
   /**
-   * Search journal entries by semantic similarity
+   * Search journal entries by semantic similarity (if embedder available) or text matching
    */
   async search(
     query: string,
@@ -278,8 +312,29 @@ export class JournalManager {
       minSimilarity?: number;
     } = {}
   ): Promise<JournalSearchResult[]> {
+    // Use vector search if embedder is available
+    if (this.embedder) {
+      return this.vectorSearchEntries(query, options);
+    }
+
+    // Fall back to text-based search
+    return this.textSearchEntries(query, options);
+  }
+
+  /**
+   * Search journal entries using vector embeddings
+   */
+  private async vectorSearchEntries(
+    query: string,
+    options: {
+      entryType?: JournalEntryType;
+      sessionId?: string;
+      limit?: number;
+      minSimilarity?: number;
+    } = {}
+  ): Promise<JournalSearchResult[]> {
     if (!this.embedder) {
-      throw new Error('Embedding provider required for semantic search');
+      throw new Error('Embedding provider required for vector search');
     }
 
     const embedding = await this.embedder.embed(query);
@@ -308,6 +363,71 @@ export class JournalManager {
       ...this.rowToEntry(row),
       similarity: row.similarity,
     }));
+  }
+
+  /**
+   * Search journal entries using text-based LIKE matching
+   */
+  private async textSearchEntries(
+    query: string,
+    options: {
+      entryType?: JournalEntryType;
+      sessionId?: string;
+      limit?: number;
+    } = {}
+  ): Promise<JournalSearchResult[]> {
+    const { entryType, sessionId, limit = 10 } = options;
+
+    // Split query into keywords for better matching
+    const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length > 2);
+    if (keywords.length === 0) {
+      return [];
+    }
+
+    // Build WHERE clause for text matching
+    const conditions: string[] = [];
+    const args: unknown[] = [];
+
+    if (entryType) {
+      conditions.push('entry_type = ?');
+      args.push(entryType);
+    }
+
+    if (sessionId) {
+      conditions.push('session_id = ?');
+      args.push(sessionId);
+    }
+
+    // Match any keyword in content
+    const keywordConditions = keywords.map(() => 'LOWER(content) LIKE ?');
+    conditions.push(`(${keywordConditions.join(' OR ')})`);
+    for (const keyword of keywords) {
+      args.push(`%${keyword}%`);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const sql = `
+      SELECT * FROM journal
+      ${whereClause}
+      ORDER BY created_at DESC
+      LIMIT ?
+    `;
+    args.push(limit);
+
+    const result = await this.db.query(sql, args);
+
+    // Calculate a simple relevance score based on keyword matches
+    return result.rows.map(row => {
+      const content = (row.content as string).toLowerCase();
+      const matchCount = keywords.filter(k => content.includes(k)).length;
+      const similarity = matchCount / keywords.length;
+
+      return {
+        ...this.rowToEntry(row),
+        similarity,
+      };
+    });
   }
 
   /**

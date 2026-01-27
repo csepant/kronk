@@ -5,8 +5,8 @@
  * and query helpers for the Kronk schema.
  */
 
-import { createClient, type Client, type ResultSet } from '@libsql/client';
-import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { createClient, type Client, type ResultSet, type InArgs } from '@libsql/client';
+import { getSchemaSQL, SCHEMA_VERSION } from './schema.js';
 
 export interface KronkDbConfig {
   /** Path to local SQLite file or Turso URL */
@@ -17,6 +17,8 @@ export interface KronkDbConfig {
   syncUrl?: string;
   /** Sync interval in seconds */
   syncInterval?: number;
+  /** Enable vector search with embeddings */
+  useVectorSearch?: boolean;
 }
 
 export class KronkDatabase {
@@ -35,18 +37,40 @@ export class KronkDatabase {
   }
 
   /**
+   * Check if vector search is enabled
+   */
+  isVectorSearchEnabled(): boolean {
+    return this.config.useVectorSearch ?? false;
+  }
+
+  /**
    * Initialize the database schema
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    // Execute schema creation
-    const statements = SCHEMA_SQL.split(';')
+    const schemaSQL = getSchemaSQL(this.config.useVectorSearch ?? false);
+
+    // Execute schema creation - split by semicolon and filter empty/comment-only statements
+    const statements = schemaSQL.split(';')
       .map(s => s.trim())
-      .filter(s => s.length > 0);
+      .filter(s => {
+        // Remove empty statements
+        if (s.length === 0) return false;
+        // Remove comment-only statements (no actual SQL)
+        const withoutComments = s.replace(/--.*$/gm, '').trim();
+        return withoutComments.length > 0;
+      });
 
     for (const statement of statements) {
-      await this.client.execute(statement);
+      try {
+        await this.client.execute(statement);
+      } catch (error) {
+        const preview = statement.slice(0, 100).replace(/\n/g, ' ');
+        console.error(`[Kronk] Schema error on: ${preview}...`);
+        console.error(`[Kronk] Error: ${error instanceof Error ? error.message : error}`);
+        throw error;
+      }
     }
 
     this.initialized = true;
@@ -64,7 +88,7 @@ export class KronkDatabase {
    * Execute a query with parameters
    */
   async query<T = unknown>(sql: string, args?: unknown[]): Promise<ResultSet> {
-    return this.client.execute({ sql, args: args ?? [] });
+    return this.client.execute({ sql, args: (args ?? []) as InArgs });
   }
 
   /**
@@ -72,7 +96,7 @@ export class KronkDatabase {
    */
   async transaction(queries: Array<{ sql: string; args?: unknown[] }>): Promise<ResultSet[]> {
     return this.client.batch(
-      queries.map(q => ({ sql: q.sql, args: q.args ?? [] })),
+      queries.map(q => ({ sql: q.sql, args: (q.args ?? []) as InArgs })),
       'write'
     );
   }
@@ -80,6 +104,7 @@ export class KronkDatabase {
   /**
    * Vector similarity search helper
    * Uses libSQL's native vector_distance_cos function
+   * @throws Error if vector search is not enabled
    */
   async vectorSearch(
     table: 'memory' | 'journal',
@@ -91,6 +116,12 @@ export class KronkDatabase {
       filterArgs?: unknown[];
     } = {}
   ): Promise<Array<{ id: string; content: string; similarity: number; [key: string]: unknown }>> {
+    if (!this.isVectorSearchEnabled()) {
+      throw new Error(
+        'Vector search is not enabled. Initialize with --vector-search flag or set useVectorSearch: true in config.'
+      );
+    }
+
     const { limit = 10, minSimilarity = 0.5, filter, filterArgs = [] } = options;
 
     // Convert embedding array to vector blob format
@@ -113,9 +144,11 @@ export class KronkDatabase {
     const result = await this.query(sql, [...filterArgs, minSimilarity, limit]);
 
     return result.rows.map(row => ({
-      ...row,
+      id: row.id as string,
+      content: row.content as string,
       similarity: row.similarity as number,
-    })) as Array<{ id: string; content: string; similarity: number }>;
+      ...row,
+    }));
   }
 
   /**
@@ -156,9 +189,10 @@ export class KronkDatabase {
 /**
  * Create a Kronk database instance with local file storage
  */
-export function createLocalDb(dbPath: string): KronkDatabase {
+export function createLocalDb(dbPath: string, options?: { useVectorSearch?: boolean }): KronkDatabase {
   return new KronkDatabase({
     url: `file:${dbPath}`,
+    useVectorSearch: options?.useVectorSearch,
   });
 }
 

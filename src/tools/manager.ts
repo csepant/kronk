@@ -53,6 +53,13 @@ export class ToolsManager {
   }
 
   /**
+   * Get the database instance (for handlers that need direct access)
+   */
+  getDatabase(): KronkDatabase {
+    return this.db;
+  }
+
+  /**
    * Register a tool in the database
    */
   async register(input: ToolInput): Promise<Tool> {
@@ -219,6 +226,68 @@ export class ToolsManager {
         duration: Date.now() - startTime,
       };
     }
+  }
+
+  /**
+   * Search for tools by query string (matches name and description)
+   */
+  async search(
+    query: string,
+    options: { category?: string; includeDisabled?: boolean } = {}
+  ): Promise<Tool[]> {
+    const { category, includeDisabled = false } = options;
+    const lowerQuery = query.toLowerCase();
+
+    let sql = 'SELECT * FROM tools WHERE 1=1';
+    const args: unknown[] = [];
+
+    if (!includeDisabled) {
+      sql += ' AND enabled = 1';
+    }
+
+    // Filter by category via metadata
+    if (category && category !== 'all') {
+      sql += ' AND json_extract(metadata, \'$.category\') = ?';
+      args.push(category);
+    }
+
+    sql += ' ORDER BY priority DESC, name ASC';
+    const result = await this.db.query(sql, args);
+
+    // Filter by name/description match in JavaScript (SQLite LIKE is limited)
+    return result.rows
+      .map(r => this.rowToTool(r))
+      .filter(tool =>
+        tool.name.toLowerCase().includes(lowerQuery) ||
+        tool.description.toLowerCase().includes(lowerQuery)
+      );
+  }
+
+  /**
+   * List tools by category
+   */
+  async listByCategory(category: string): Promise<Tool[]> {
+    const sql = `
+      SELECT * FROM tools
+      WHERE enabled = 1
+        AND json_extract(metadata, '$.category') = ?
+      ORDER BY priority DESC, name ASC
+    `;
+    const result = await this.db.query(sql, [category]);
+    return result.rows.map(r => this.rowToTool(r));
+  }
+
+  /**
+   * List core tools (always available, high priority)
+   */
+  async listCoreTools(): Promise<Tool[]> {
+    const coreToolNames = ['shell', 'create_task', 'create_tool', 'discover_tools'];
+    const placeholders = coreToolNames.map(() => '?').join(',');
+    const result = await this.db.query(
+      `SELECT * FROM tools WHERE name IN (${placeholders}) AND enabled = 1 ORDER BY priority DESC`,
+      coreToolNames
+    );
+    return result.rows.map(r => this.rowToTool(r));
   }
 
   /**

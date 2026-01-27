@@ -79,36 +79,63 @@ export class MemoryManager {
     const tierConfig = MEMORY_TIERS[input.tier];
     const importance = input.importance ?? tierConfig.defaultImportance;
 
-    // Generate embedding if provider is available
-    let embeddingBlob: string | null = null;
-    if (this.embedder) {
+    // Generate embedding if provider is available and vector search is enabled
+    let sql: string;
+    let args: unknown[];
+
+    if (this.embedder && this.db.isVectorSearchEnabled()) {
       const embedding = await this.embedder.embed(input.content);
-      embeddingBlob = `vector('[${embedding.join(',')}]')`;
+      const embeddingBlob = `vector('[${embedding.join(',')}]')`;
+
+      sql = `
+        INSERT INTO memory (
+          tier, content, summary, embedding,
+          importance, decay_rate, source, tags, related_ids, expires_at
+        ) VALUES (
+          ?, ?, ?, ${embeddingBlob},
+          ?, ?, ?, ?, ?, ?
+        )
+        RETURNING *
+      `;
+
+      args = [
+        input.tier,
+        input.content,
+        input.summary ?? null,
+        importance,
+        tierConfig.decayRate,
+        input.source ?? 'agent',
+        JSON.stringify(input.tags ?? []),
+        JSON.stringify(input.relatedIds ?? []),
+        input.expiresAt?.toISOString() ?? null,
+      ];
+    } else {
+      // Text-only schema without embedding column
+      sql = `
+        INSERT INTO memory (
+          tier, content, summary,
+          importance, decay_rate, source, tags, related_ids, expires_at
+        ) VALUES (
+          ?, ?, ?,
+          ?, ?, ?, ?, ?, ?
+        )
+        RETURNING *
+      `;
+
+      args = [
+        input.tier,
+        input.content,
+        input.summary ?? null,
+        importance,
+        tierConfig.decayRate,
+        input.source ?? 'agent',
+        JSON.stringify(input.tags ?? []),
+        JSON.stringify(input.relatedIds ?? []),
+        input.expiresAt?.toISOString() ?? null,
+      ];
     }
 
-    const sql = `
-      INSERT INTO memory (
-        tier, content, summary, embedding,
-        importance, decay_rate, source, tags, related_ids, expires_at
-      ) VALUES (
-        ?, ?, ?, ${embeddingBlob ?? 'NULL'},
-        ?, ?, ?, ?, ?, ?
-      )
-      RETURNING *
-    `;
-
-    const result = await this.db.query(sql, [
-      input.tier,
-      input.content,
-      input.summary ?? null,
-      importance,
-      tierConfig.decayRate,
-      input.source ?? 'agent',
-      JSON.stringify(input.tags ?? []),
-      JSON.stringify(input.relatedIds ?? []),
-      input.expiresAt?.toISOString() ?? null,
-    ]);
-
+    const result = await this.db.query(sql, args);
     const row = result.rows[0];
     return this.rowToMemory(row);
   }
@@ -132,7 +159,7 @@ export class MemoryManager {
   }
 
   /**
-   * Search memories by semantic similarity
+   * Search memories by semantic similarity (if embedder available) or text matching
    */
   async search(
     query: string,
@@ -142,8 +169,28 @@ export class MemoryManager {
       minSimilarity?: number;
     } = {}
   ): Promise<Array<Memory & { similarity: number }>> {
+    // Use vector search if embedder is available
+    if (this.embedder) {
+      return this.vectorSearch(query, options);
+    }
+
+    // Fall back to text-based search
+    return this.textSearch(query, options);
+  }
+
+  /**
+   * Search memories using vector embeddings
+   */
+  private async vectorSearch(
+    query: string,
+    options: {
+      tier?: MemoryTier;
+      limit?: number;
+      minSimilarity?: number;
+    } = {}
+  ): Promise<Array<Memory & { similarity: number }>> {
     if (!this.embedder) {
-      throw new Error('Embedding provider required for semantic search');
+      throw new Error('Embedding provider required for vector search');
     }
 
     const embedding = await this.embedder.embed(query);
@@ -171,6 +218,75 @@ export class MemoryManager {
       ...this.rowToMemory(row),
       similarity: row.similarity,
     }));
+  }
+
+  /**
+   * Search memories using text-based LIKE matching
+   */
+  private async textSearch(
+    query: string,
+    options: {
+      tier?: MemoryTier;
+      limit?: number;
+    } = {}
+  ): Promise<Array<Memory & { similarity: number }>> {
+    const { tier, limit = 10 } = options;
+
+    // Split query into keywords for better matching
+    const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length > 2);
+    if (keywords.length === 0) {
+      return [];
+    }
+
+    // Build WHERE clause for text matching
+    const conditions: string[] = [];
+    const args: unknown[] = [];
+
+    if (tier) {
+      conditions.push('tier = ?');
+      args.push(tier);
+    }
+
+    // Match any keyword in content or summary
+    const keywordConditions = keywords.map(() => '(LOWER(content) LIKE ? OR LOWER(summary) LIKE ?)');
+    conditions.push(`(${keywordConditions.join(' OR ')})`);
+    for (const keyword of keywords) {
+      args.push(`%${keyword}%`, `%${keyword}%`);
+    }
+
+    conditions.push('(expires_at IS NULL OR expires_at > datetime(\'now\'))');
+
+    const sql = `
+      SELECT * FROM memory
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY importance DESC, last_accessed_at DESC
+      LIMIT ?
+    `;
+    args.push(limit);
+
+    const result = await this.db.query(sql, args);
+
+    // Update access counts for retrieved memories
+    if (result.rows.length > 0) {
+      const ids = result.rows.map(r => r.id as string);
+      await this.db.query(
+        `UPDATE memory SET access_count = access_count + 1, last_accessed_at = datetime('now')
+         WHERE id IN (${ids.map(() => '?').join(',')})`,
+        ids
+      );
+    }
+
+    // Calculate a simple relevance score based on keyword matches
+    return result.rows.map(row => {
+      const content = ((row.content as string) + ' ' + ((row.summary as string) ?? '')).toLowerCase();
+      const matchCount = keywords.filter(k => content.includes(k)).length;
+      const similarity = matchCount / keywords.length;
+
+      return {
+        ...this.rowToMemory(row),
+        similarity,
+      };
+    });
   }
 
   /**

@@ -1,18 +1,66 @@
 /**
  * Kronk Agent Core
- * 
+ *
  * The main agent class that orchestrates memory, tools, journal,
  * and LLM interactions for autonomous operation.
  */
 
+import { EventEmitter } from 'node:events';
 import type { KronkInstance, KronkConfig } from '../init/index.js';
 import type { Memory, ContextWindow, EmbeddingProvider } from '../memory/manager.js';
 import type { Tool, ToolHandler } from '../tools/manager.js';
 import type { JournalEntry } from '../journal/manager.js';
+import {
+  shellToolSchema,
+  createShellHandler,
+  createTaskToolSchema,
+  createTaskHandler,
+  createToolToolSchema,
+  createCreateToolHandler,
+  loadDynamicTools,
+  discoverToolsSchema,
+  createDiscoverToolsHandler,
+  discoverSkillsSchema,
+  createDiscoverSkillsHandler,
+  readSkillSchema,
+  createReadSkillHandler,
+} from '../tools/handlers/index.js';
+
+/** Shell confirmation event data */
+export interface ShellConfirmEvent {
+  command: string;
+  cwd: string;
+  resolve: (approved: boolean) => void;
+}
+
+/** Events emitted by the Agent */
+export interface AgentEvents {
+  'state:change': (state: AgentState, previousState: AgentState) => void;
+  'memory:store': (memory: Memory) => void;
+  'memory:decay': (count: number) => void;
+  'journal:entry': (entry: JournalEntry) => void;
+  'tool:invoke': (name: string, params: Record<string, unknown>, phase: 'start' | 'end', result?: unknown) => void;
+  'run:start': (message: string) => void;
+  'run:complete': (result: RunResult) => void;
+  'run:iteration': (iteration: number, maxIterations: number) => void;
+  'shell:confirm': (event: ShellConfirmEvent) => void;
+  'thinking:start': () => void;
+  'thinking:chunk': (chunk: string, accumulated: string) => void;
+  'thinking:complete': (fullThought: string, tokensUsed: number) => void;
+  'error': (error: Error) => void;
+}
 
 export interface Message {
   role: 'system' | 'user' | 'assistant';
   content: string;
+}
+
+/** Streaming chunk from LLM */
+export interface StreamChunk {
+  type: 'chunk' | 'tool_call' | 'done';
+  content?: string;
+  toolCall?: { name: string; arguments: Record<string, unknown> };
+  tokensUsed?: number;
 }
 
 export interface LLMProvider {
@@ -29,13 +77,20 @@ export interface LLMProvider {
     }>;
     tokensUsed: number;
   }>;
+
+  /** Generate a streaming completion (optional) */
+  completeStream?(messages: Message[], options?: {
+    temperature?: number;
+    maxTokens?: number;
+    tools?: Tool[];
+  }): AsyncGenerator<StreamChunk>;
 }
 
 export interface AgentOptions {
   /** LLM provider for completions */
   llm: LLMProvider;
-  /** Embedding provider for vector search */
-  embedder: EmbeddingProvider;
+  /** Embedding provider for vector search (optional - text search used if not provided) */
+  embedder?: EmbeddingProvider;
   /** Maximum iterations per run */
   maxIterations?: number;
   /** Whether to auto-journal actions */
@@ -56,16 +111,18 @@ export interface RunResult {
   error?: string;
 }
 
-export class Agent {
+export class Agent extends EventEmitter {
   private instance: KronkInstance;
   private llm: LLMProvider;
-  private embedder: EmbeddingProvider;
+  private embedder?: EmbeddingProvider;
   private maxIterations: number;
   private autoJournal: boolean;
   private systemPromptAdditions: string;
   private state: AgentState = 'idle';
+  private startTime: number = Date.now();
 
   constructor(instance: KronkInstance, options: AgentOptions) {
+    super();
     this.instance = instance;
     this.llm = options.llm;
     this.embedder = options.embedder;
@@ -73,9 +130,148 @@ export class Agent {
     this.autoJournal = options.autoJournal ?? true;
     this.systemPromptAdditions = options.systemPromptAdditions ?? '';
 
-    // Connect embedder to managers
-    this.instance.memory.setEmbedder(this.embedder);
-    this.instance.journal.setEmbedder(this.embedder);
+    // Connect embedder to managers if provided
+    if (this.embedder) {
+      this.instance.memory.setEmbedder(this.embedder);
+      this.instance.journal.setEmbedder(this.embedder);
+    }
+  }
+
+  /**
+   * Initialize the agent, registering core tools and loading dynamic tools.
+   * Must be called after construction before using the agent.
+   */
+  async initialize(): Promise<void> {
+    await this.registerCoreTools();
+    const dynamicCount = await loadDynamicTools(this.instance.tools, this);
+    if (dynamicCount > 0) {
+      console.log(`[Kronk] Loaded ${dynamicCount} dynamic tool(s)`);
+    }
+  }
+
+  /**
+   * Register built-in core tools (shell, create_task, create_tool, discover_tools, skills)
+   */
+  private async registerCoreTools(): Promise<void> {
+    // Register shell tool
+    await this.instance.tools.register({
+      name: 'shell',
+      description: 'Execute shell commands and return stdout/stderr/exit code. Requires user confirmation.',
+      schema: shellToolSchema,
+      handler: 'core:shell',
+      priority: 10,
+      metadata: { category: 'shell' },
+    });
+    this.instance.tools.registerHandler(
+      'shell',
+      createShellHandler(this, this.instance.paths.root)
+    );
+
+    // Register create_task tool
+    await this.instance.tools.register({
+      name: 'create_task',
+      description: 'Add a task to the background queue for async processing by the daemon.',
+      schema: createTaskToolSchema,
+      handler: 'core:create_task',
+      priority: 10,
+      metadata: { category: 'meta' },
+    });
+    this.instance.tools.registerHandler(
+      'create_task',
+      createTaskHandler(this.instance.db)
+    );
+
+    // Register create_tool tool
+    await this.instance.tools.register({
+      name: 'create_tool',
+      description: 'Dynamically create new tools at runtime with shell, HTTP, or JavaScript handlers.',
+      schema: createToolToolSchema,
+      handler: 'core:create_tool',
+      priority: 10,
+      metadata: { category: 'meta' },
+    });
+    this.instance.tools.registerHandler(
+      'create_tool',
+      createCreateToolHandler(this.instance.tools, this)
+    );
+
+    // Register discover_tools tool
+    await this.instance.tools.register({
+      name: 'discover_tools',
+      description: 'Search and list available tools. Use to find tools for specific tasks.',
+      schema: discoverToolsSchema,
+      handler: 'core:discover_tools',
+      priority: 10,
+      metadata: { category: 'meta' },
+    });
+    this.instance.tools.registerHandler(
+      'discover_tools',
+      createDiscoverToolsHandler(this.instance.tools)
+    );
+
+    // Register discover_skills tool
+    await this.instance.tools.register({
+      name: 'discover_skills',
+      description: 'List available skill documentation. Skills describe domain-specific capabilities and commands.',
+      schema: discoverSkillsSchema,
+      handler: 'core:discover_skills',
+      priority: 10,
+      metadata: { category: 'meta' },
+    });
+    this.instance.tools.registerHandler(
+      'discover_skills',
+      createDiscoverSkillsHandler(this.instance.paths.skills)
+    );
+
+    // Register read_skill tool
+    await this.instance.tools.register({
+      name: 'read_skill',
+      description: 'Read a specific skill documentation file to learn about available commands and capabilities.',
+      schema: readSkillSchema,
+      handler: 'core:read_skill',
+      priority: 10,
+      metadata: { category: 'meta' },
+    });
+    this.instance.tools.registerHandler(
+      'read_skill',
+      createReadSkillHandler(this.instance.paths.skills)
+    );
+  }
+
+  /**
+   * Type-safe event emitter methods
+   */
+  override on<K extends keyof AgentEvents>(event: K, listener: AgentEvents[K]): this {
+    return super.on(event, listener);
+  }
+
+  override emit<K extends keyof AgentEvents>(event: K, ...args: Parameters<AgentEvents[K]>): boolean {
+    return super.emit(event, ...args);
+  }
+
+  /**
+   * Get the uptime in milliseconds
+   */
+  getUptime(): number {
+    return Date.now() - this.startTime;
+  }
+
+  /**
+   * Get the underlying KronkInstance
+   */
+  getInstance(): KronkInstance {
+    return this.instance;
+  }
+
+  /**
+   * Set the agent state and emit change event
+   */
+  private setState(newState: AgentState): void {
+    const previousState = this.state;
+    this.state = newState;
+    if (previousState !== newState) {
+      this.emit('state:change', newState, previousState);
+    }
   }
 
   /**
@@ -105,6 +301,8 @@ export class Agent {
       memoriesCreated: [],
     };
 
+    this.emit('run:start', userMessage);
+
     try {
       // Start session if not active
       if (!this.instance.journal.getSessionId()) {
@@ -117,6 +315,7 @@ export class Agent {
       if (this.autoJournal) {
         const entry = await this.instance.journal.observation(`User: ${userMessage}`);
         result.journalEntries.push(entry);
+        this.emit('journal:entry', entry);
       }
 
       // Build context
@@ -124,17 +323,18 @@ export class Agent {
       const tools = await this.instance.tools.listEnabled();
 
       // Run agent loop
-      let messages: Message[] = [
+      const messages: Message[] = [
         { role: 'system', content: await this.buildSystemPrompt(context, tools) },
         { role: 'user', content: userMessage },
       ];
 
       while (result.iterations < this.maxIterations) {
         result.iterations++;
-        this.state = 'thinking';
+        this.setState('thinking');
+        this.emit('run:iteration', result.iterations, this.maxIterations);
 
-        // Get LLM response
-        const completion = await this.llm.complete(messages, { tools });
+        // Get LLM response (with streaming if available)
+        const completion = await this.getCompletion(messages, tools);
         result.tokensUsed += completion.tokensUsed;
 
         // Log thought
@@ -144,19 +344,22 @@ export class Agent {
             { tokensUsed: completion.tokensUsed }
           );
           result.journalEntries.push(entry);
+          this.emit('journal:entry', entry);
         }
 
         // Handle tool calls
         if (completion.toolCalls && completion.toolCalls.length > 0) {
-          this.state = 'acting';
+          this.setState('acting');
 
           for (const toolCall of completion.toolCalls) {
+            this.emit('tool:invoke', toolCall.name, toolCall.arguments, 'start');
             const startTime = Date.now();
             const toolResult = await this.instance.tools.invoke(
               toolCall.name,
               toolCall.arguments
             );
             const duration = Date.now() - startTime;
+            this.emit('tool:invoke', toolCall.name, toolCall.arguments, 'end', toolResult);
 
             // Find tool for logging
             const tool = tools.find(t => t.name === toolCall.name);
@@ -171,6 +374,7 @@ export class Agent {
                 duration
               );
               result.journalEntries.push(entry);
+              this.emit('journal:entry', entry);
             }
 
             // Add tool result to messages
@@ -192,7 +396,7 @@ export class Agent {
         result.success = true;
 
         // Store interaction in short-term memory
-        this.state = 'observing';
+        this.setState('observing');
         const memory = await this.instance.memory.store({
           tier: 'system1',
           content: `User: ${userMessage}\nAssistant: ${completion.content}`,
@@ -201,6 +405,7 @@ export class Agent {
           tags: ['conversation'],
         });
         result.memoriesCreated.push(memory);
+        this.emit('memory:store', memory);
 
         break;
       }
@@ -209,20 +414,70 @@ export class Agent {
       if (!result.success) {
         result.error = `Reached maximum iterations (${this.maxIterations})`;
         if (this.autoJournal) {
-          await this.instance.journal.error(result.error);
+          const entry = await this.instance.journal.error(result.error);
+          this.emit('journal:entry', entry);
         }
       }
 
     } catch (error) {
-      result.error = error instanceof Error ? error.message : String(error);
+      const err = error instanceof Error ? error : new Error(String(error));
+      result.error = err.message;
+      this.emit('error', err);
       if (this.autoJournal) {
-        await this.instance.journal.error(`Agent error: ${result.error}`);
+        const entry = await this.instance.journal.error(`Agent error: ${result.error}`);
+        this.emit('journal:entry', entry);
       }
     } finally {
-      this.state = 'idle';
+      this.setState('idle');
+      this.emit('run:complete', result);
     }
 
     return result;
+  }
+
+  /**
+   * Get completion from LLM, using streaming if available
+   */
+  private async getCompletion(
+    messages: Message[],
+    tools: Tool[]
+  ): Promise<{
+    content: string;
+    toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+    tokensUsed: number;
+  }> {
+    // Use streaming if available
+    if (this.llm.completeStream) {
+      this.emit('thinking:start');
+      let accumulated = '';
+      const toolCalls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+      let tokensUsed = 0;
+
+      for await (const chunk of this.llm.completeStream(messages, { tools })) {
+        if (chunk.type === 'chunk' && chunk.content) {
+          accumulated += chunk.content;
+          this.emit('thinking:chunk', chunk.content, accumulated);
+        } else if (chunk.type === 'tool_call' && chunk.toolCall) {
+          toolCalls.push(chunk.toolCall);
+        } else if (chunk.type === 'done') {
+          tokensUsed = chunk.tokensUsed ?? 0;
+        }
+      }
+
+      this.emit('thinking:complete', accumulated, tokensUsed);
+
+      return {
+        content: accumulated,
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        tokensUsed,
+      };
+    }
+
+    // Fall back to non-streaming
+    this.emit('thinking:start');
+    const completion = await this.llm.complete(messages, { tools });
+    this.emit('thinking:complete', completion.content, completion.tokensUsed);
+    return completion;
   }
 
   /**
@@ -233,13 +488,15 @@ export class Agent {
     tags?: string[];
     importance?: number;
   } = {}): Promise<Memory> {
-    return this.instance.memory.store({
+    const memory = await this.instance.memory.store({
       tier: options.tier ?? 'working',
       content,
       tags: options.tags,
       importance: options.importance,
       source: 'user',
     });
+    this.emit('memory:store', memory);
+    return memory;
   }
 
   /**
@@ -272,13 +529,13 @@ export class Agent {
    * Trigger memory consolidation
    */
   async consolidate(summarizer: (memories: Memory[]) => Promise<string>): Promise<void> {
-    this.state = 'reflecting';
+    this.setState('reflecting');
     try {
       await this.instance.memory.consolidate('system1', summarizer);
       await this.instance.memory.consolidate('working', summarizer);
       await this.instance.memory.consolidate('system2', summarizer);
     } finally {
-      this.state = 'idle';
+      this.setState('idle');
     }
   }
 
@@ -286,15 +543,26 @@ export class Agent {
    * Apply memory decay
    */
   async decayMemories(): Promise<number> {
-    return this.instance.memory.applyDecay();
+    const count = await this.instance.memory.applyDecay();
+    this.emit('memory:decay', count);
+    return count;
   }
 
   /**
    * Get agent statistics
    */
   async getStats(): Promise<{
-    memory: Awaited<ReturnType<typeof this.instance.memory.getStats>>;
-    journal: Awaited<ReturnType<typeof this.instance.journal.getSessionStats>>;
+    memory: {
+      system2: { count: number; avgImportance: number; totalTokens: number };
+      working: { count: number; avgImportance: number; totalTokens: number };
+      system1: { count: number; avgImportance: number; totalTokens: number };
+    };
+    journal: {
+      totalEntries: number;
+      byType: Record<string, number>;
+      totalTokens: number;
+      totalDuration: number;
+    };
     tools: number;
   }> {
     const [memory, journal, tools] = await Promise.all([
@@ -314,16 +582,15 @@ export class Agent {
    * Reflect on recent activity
    */
   async reflect(): Promise<JournalEntry> {
-    this.state = 'reflecting';
+    this.setState('reflecting');
     try {
-      const recentEntries = await this.instance.journal.getRecent(20);
       const narrative = await this.instance.journal.formatAsNarrative(20);
 
       // Use LLM to generate reflection
       const completion = await this.llm.complete([
         {
           role: 'system',
-          content: `You are an AI agent reflecting on your recent activity. 
+          content: `You are an AI agent reflecting on your recent activity.
 Analyze the following activity log and provide insights about:
 - What worked well
 - What could be improved
@@ -338,9 +605,10 @@ Be concise and actionable.`,
       const reflection = await this.instance.journal.reflection(completion.content, {
         tokensUsed: completion.tokensUsed,
       });
+      this.emit('journal:entry', reflection);
 
       // Store reflection in working memory
-      await this.instance.memory.store({
+      const memory = await this.instance.memory.store({
         tier: 'working',
         content: completion.content,
         summary: 'Recent self-reflection and insights',
@@ -348,10 +616,11 @@ Be concise and actionable.`,
         tags: ['reflection', 'meta'],
         importance: 0.7,
       });
+      this.emit('memory:store', memory);
 
       return reflection;
     } finally {
-      this.state = 'idle';
+      this.setState('idle');
     }
   }
 
