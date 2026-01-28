@@ -103,6 +103,7 @@ export class Daemon extends EventEmitter {
 
     // Create agent
     this.agent = new Agent(this.instance, agentOptions);
+    await this.agent.initialize();
 
     // Create scheduler
     this.scheduler = new Scheduler(this.agent, this.config.scheduler);

@@ -6,6 +6,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { readFile } from 'node:fs/promises';
 import type { KronkInstance, KronkConfig } from '../init/index.js';
 import type { Memory, ContextWindow, EmbeddingProvider } from '../memory/manager.js';
 import type { Tool, ToolHandler } from '../tools/manager.js';
@@ -24,6 +25,8 @@ import {
   createDiscoverSkillsHandler,
   readSkillSchema,
   createReadSkillHandler,
+  journalToolSchema,
+  createJournalHandler,
 } from '../tools/handlers/index.js';
 
 /** Shell confirmation event data */
@@ -50,16 +53,27 @@ export interface AgentEvents {
   'error': (error: Error) => void;
 }
 
+/** Tool call information with ID for multi-turn conversations */
+export interface ToolCallInfo {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
 export interface Message {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | null;
+  /** Tool calls made by the assistant */
+  tool_calls?: ToolCallInfo[];
+  /** Tool call ID for tool result messages */
+  tool_call_id?: string;
 }
 
 /** Streaming chunk from LLM */
 export interface StreamChunk {
   type: 'chunk' | 'tool_call' | 'done';
   content?: string;
-  toolCall?: { name: string; arguments: Record<string, unknown> };
+  toolCall?: { id?: string; name: string; arguments: Record<string, unknown> };
   tokensUsed?: number;
 }
 
@@ -72,6 +86,7 @@ export interface LLMProvider {
   }): Promise<{
     content: string;
     toolCalls?: Array<{
+      id?: string;
       name: string;
       arguments: Record<string, unknown>;
     }>;
@@ -101,6 +116,20 @@ export interface AgentOptions {
 
 export type AgentState = 'idle' | 'thinking' | 'acting' | 'observing' | 'reflecting';
 
+/** Raw LLM response data for debugging */
+export interface RawLlmResponse {
+  /** Accumulated text chunks */
+  chunks: string[];
+  /** Tool calls received */
+  toolCalls: Array<{ id?: string; name: string; arguments: Record<string, unknown> }>;
+  /** Total tokens used */
+  tokensUsed: number;
+  /** Timestamp when response started */
+  startedAt: Date;
+  /** Timestamp when response completed */
+  completedAt: Date;
+}
+
 export interface RunResult {
   success: boolean;
   response: string;
@@ -109,6 +138,8 @@ export interface RunResult {
   journalEntries: JournalEntry[];
   memoriesCreated: Memory[];
   error?: string;
+  /** Raw LLM responses for each iteration (debug mode) */
+  rawLlmResponses?: RawLlmResponse[];
 }
 
 export class Agent extends EventEmitter {
@@ -127,7 +158,7 @@ export class Agent extends EventEmitter {
     this.llm = options.llm;
     this.embedder = options.embedder;
     this.maxIterations = options.maxIterations ?? 10;
-    this.autoJournal = options.autoJournal ?? true;
+    this.autoJournal = options.autoJournal ?? false;
     this.systemPromptAdditions = options.systemPromptAdditions ?? '';
 
     // Connect embedder to managers if provided
@@ -236,6 +267,20 @@ export class Agent extends EventEmitter {
       'read_skill',
       createReadSkillHandler(this.instance.paths.skills)
     );
+
+    // Register journal tool
+    await this.instance.tools.register({
+      name: 'journal',
+      description: 'Log an entry to the journal. Use for recording decisions, reflections, milestones, errors, and noteworthy observations. Only log information worth remembering.',
+      schema: journalToolSchema,
+      handler: 'core:journal',
+      priority: 10,
+      metadata: { category: 'meta' },
+    });
+    this.instance.tools.registerHandler(
+      'journal',
+      createJournalHandler(this.instance.journal)
+    );
   }
 
   /**
@@ -292,6 +337,7 @@ export class Agent extends EventEmitter {
    * Run the agent with a user message
    */
   async run(userMessage: string): Promise<RunResult> {
+    const rawLlmResponses: RawLlmResponse[] = [];
     const result: RunResult = {
       success: false,
       response: '',
@@ -299,6 +345,7 @@ export class Agent extends EventEmitter {
       tokensUsed: 0,
       journalEntries: [],
       memoriesCreated: [],
+      rawLlmResponses,
     };
 
     this.emit('run:start', userMessage);
@@ -309,13 +356,6 @@ export class Agent extends EventEmitter {
         await this.instance.journal.startSession({
           goal: userMessage.slice(0, 200),
         });
-      }
-
-      // Log user input
-      if (this.autoJournal) {
-        const entry = await this.instance.journal.observation(`User: ${userMessage}`);
-        result.journalEntries.push(entry);
-        this.emit('journal:entry', entry);
       }
 
       // Build context
@@ -336,55 +376,39 @@ export class Agent extends EventEmitter {
         // Get LLM response (with streaming if available)
         const completion = await this.getCompletion(messages, tools);
         result.tokensUsed += completion.tokensUsed;
-
-        // Log thought
-        if (this.autoJournal) {
-          const entry = await this.instance.journal.thought(
-            `Iteration ${result.iterations}: ${completion.content.slice(0, 500)}`,
-            { tokensUsed: completion.tokensUsed }
-          );
-          result.journalEntries.push(entry);
-          this.emit('journal:entry', entry);
-        }
+        rawLlmResponses.push(completion.rawResponse);
 
         // Handle tool calls
         if (completion.toolCalls && completion.toolCalls.length > 0) {
           this.setState('acting');
 
-          for (const toolCall of completion.toolCalls) {
+          // Add assistant message with all tool calls
+          const toolCallsWithIds: ToolCallInfo[] = completion.toolCalls.map((tc, index) => ({
+            id: tc.id ?? `tool_call_${Date.now()}_${index}`,
+            name: tc.name,
+            arguments: tc.arguments,
+          }));
+
+          messages.push({
+            role: 'assistant',
+            content: completion.content || null,
+            tool_calls: toolCallsWithIds,
+          });
+
+          // Execute each tool and add result messages
+          for (const toolCall of toolCallsWithIds) {
             this.emit('tool:invoke', toolCall.name, toolCall.arguments, 'start');
-            const startTime = Date.now();
             const toolResult = await this.instance.tools.invoke(
               toolCall.name,
               toolCall.arguments
             );
-            const duration = Date.now() - startTime;
             this.emit('tool:invoke', toolCall.name, toolCall.arguments, 'end', toolResult);
 
-            // Find tool for logging
-            const tool = tools.find(t => t.name === toolCall.name);
-
-            // Log action
-            if (this.autoJournal) {
-              const entry = await this.instance.journal.action(
-                `Called ${toolCall.name}`,
-                tool?.id ?? '',
-                JSON.stringify(toolCall.arguments),
-                JSON.stringify(toolResult.result ?? toolResult.error),
-                duration
-              );
-              result.journalEntries.push(entry);
-              this.emit('journal:entry', entry);
-            }
-
-            // Add tool result to messages
+            // Add tool result message with proper format
             messages.push({
-              role: 'assistant',
-              content: `Tool call: ${toolCall.name}\nArguments: ${JSON.stringify(toolCall.arguments)}`,
-            });
-            messages.push({
-              role: 'user',
-              content: `Tool result: ${JSON.stringify(toolResult.result ?? { error: toolResult.error })}`,
+              role: 'tool',
+              tool_call_id: toolCall.id,
+              content: JSON.stringify(toolResult.result ?? { error: toolResult.error }),
             });
           }
 
@@ -413,20 +437,12 @@ export class Agent extends EventEmitter {
       // Check if we hit max iterations
       if (!result.success) {
         result.error = `Reached maximum iterations (${this.maxIterations})`;
-        if (this.autoJournal) {
-          const entry = await this.instance.journal.error(result.error);
-          this.emit('journal:entry', entry);
-        }
       }
 
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       result.error = err.message;
       this.emit('error', err);
-      if (this.autoJournal) {
-        const entry = await this.instance.journal.error(`Agent error: ${result.error}`);
-        this.emit('journal:entry', entry);
-      }
     } finally {
       this.setState('idle');
       this.emit('run:complete', result);
@@ -443,18 +459,23 @@ export class Agent extends EventEmitter {
     tools: Tool[]
   ): Promise<{
     content: string;
-    toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+    toolCalls?: Array<{ id?: string; name: string; arguments: Record<string, unknown> }>;
     tokensUsed: number;
+    rawResponse: RawLlmResponse;
   }> {
+    const startedAt = new Date();
+    const chunks: string[] = [];
+
     // Use streaming if available
     if (this.llm.completeStream) {
       this.emit('thinking:start');
       let accumulated = '';
-      const toolCalls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+      const toolCalls: Array<{ id?: string; name: string; arguments: Record<string, unknown> }> = [];
       let tokensUsed = 0;
 
       for await (const chunk of this.llm.completeStream(messages, { tools })) {
         if (chunk.type === 'chunk' && chunk.content) {
+          chunks.push(chunk.content);
           accumulated += chunk.content;
           this.emit('thinking:chunk', chunk.content, accumulated);
         } else if (chunk.type === 'tool_call' && chunk.toolCall) {
@@ -470,6 +491,13 @@ export class Agent extends EventEmitter {
         content: accumulated,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         tokensUsed,
+        rawResponse: {
+          chunks,
+          toolCalls,
+          tokensUsed,
+          startedAt,
+          completedAt: new Date(),
+        },
       };
     }
 
@@ -477,7 +505,20 @@ export class Agent extends EventEmitter {
     this.emit('thinking:start');
     const completion = await this.llm.complete(messages, { tools });
     this.emit('thinking:complete', completion.content, completion.tokensUsed);
-    return completion;
+
+    // For non-streaming, the entire response is one "chunk"
+    chunks.push(completion.content);
+
+    return {
+      ...completion,
+      rawResponse: {
+        chunks,
+        toolCalls: completion.toolCalls ?? [],
+        tokensUsed: completion.tokensUsed,
+        startedAt,
+        completedAt: new Date(),
+      },
+    };
   }
 
   /**
@@ -628,20 +669,36 @@ Be concise and actionable.`,
    * Build the system prompt with memory context and tools
    */
   private async buildSystemPrompt(context: ContextWindow, tools: Tool[]): Promise<string> {
-    const constitution = await this.instance.memory.formatContextForPrompt(context);
+    // Load constitution directly from file
+    let constitution = '';
+    try {
+      constitution = await readFile(this.instance.paths.constitution, 'utf-8');
+    } catch {
+      constitution = 'No constitution found.';
+    }
+
+    const memoryContext = this.instance.memory.formatContextForPrompt(context);
     const toolPrompt = await this.instance.tools.generateToolPrompt();
 
     return `# Agent: ${this.instance.config.name}
 
-## Constitution & Memory
+## Constitution
 ${constitution}
+
+## Memory
+${memoryContext}
 
 ## Available Tools
 ${toolPrompt}
 
 ## Instructions
 - Use your memory to maintain context across interactions
-- Log important decisions and observations
+- Use the journal tool sparingly for information worth remembering:
+  - Decisions: Record important choices and their rationale
+  - Reflections: Log insights and lessons learned
+  - Milestones: Mark significant achievements
+  - Errors: Document failures and what went wrong
+- Do NOT journal routine conversation or every action
 - Use tools when they help accomplish the user's goals
 - Be honest about limitations and uncertainties
 - Learn from mistakes and adapt your approach

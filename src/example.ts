@@ -127,6 +127,9 @@ async function main() {
     autoJournal: true,
   });
 
+  // Initialize agent (registers core tools)
+  await agent.initialize();
+
   // Register a custom tool
   await agent.registerTool(
     'get_weather',

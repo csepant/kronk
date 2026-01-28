@@ -40,3 +40,9 @@ export {
   type DiscoverSkillsResult,
   type ReadSkillResult,
 } from './skills.js';
+
+export {
+  journalToolSchema,
+  createJournalHandler,
+  type JournalResult,
+} from './journal.js';

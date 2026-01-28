@@ -27,6 +27,7 @@ export function App({ agent, queue, initialView = 'dashboard' }: AppProps): Reac
   const { exit } = useApp();
   const [view, setView] = useState<ViewMode>(initialView);
   const [showHelp, setShowHelp] = useState(false);
+  const [debugMode, setDebugMode] = useState(false);
   const agentState = useAgent(agent, queue);
 
   useInput((input, key) => {
@@ -71,6 +72,9 @@ export function App({ agent, queue, initialView = 'dashboard' }: AppProps): Reac
           setView('tasks');
           setShowHelp(false);
           break;
+        case 'd':
+          setDebugMode(!debugMode);
+          break;
         case 'q':
           if (view === 'dashboard') {
             exit();
@@ -92,6 +96,7 @@ export function App({ agent, queue, initialView = 'dashboard' }: AppProps): Reac
           <Text><Text color="yellow">3</Text> - Journal view</Text>
           <Text><Text color="yellow">4</Text> - Memory view</Text>
           <Text><Text color="yellow">5</Text> - Tasks view</Text>
+          <Text><Text color="yellow">d</Text> - Toggle debug mode</Text>
           <Text><Text color="yellow">h/?</Text> - Toggle help</Text>
           <Text><Text color="yellow">ESC</Text> - Back to dashboard</Text>
           <Text><Text color="yellow">q</Text> - Quit (from dashboard)</Text>
@@ -106,7 +111,7 @@ export function App({ agent, queue, initialView = 'dashboard' }: AppProps): Reac
 
   return (
     <Box flexDirection="column" height="100%">
-      <Header view={view} state={agentState.state} />
+      <Header view={view} state={agentState.state} debugMode={debugMode} />
 
       <Box flexGrow={1}>
         {view === 'dashboard' && (
@@ -126,6 +131,9 @@ export function App({ agent, queue, initialView = 'dashboard' }: AppProps): Reac
             isThinking={agentState.isThinking}
             currentThought={agentState.currentThought}
             lastResponse={agentState.lastResponse}
+            toolCalls={agentState.toolCalls}
+            debugMode={debugMode}
+            lastResult={agentState.lastResult}
           />
         )}
         {view === 'journal' && (
@@ -147,9 +155,10 @@ export function App({ agent, queue, initialView = 'dashboard' }: AppProps): Reac
 interface HeaderProps {
   view: ViewMode;
   state: string;
+  debugMode?: boolean;
 }
 
-function Header({ view, state }: HeaderProps): React.ReactElement {
+function Header({ view, state, debugMode }: HeaderProps): React.ReactElement {
   const stateColors: Record<string, string> = {
     idle: 'green',
     thinking: 'yellow',
@@ -174,7 +183,10 @@ function Header({ view, state }: HeaderProps): React.ReactElement {
       justifyContent="space-between"
     >
       <Text bold color="cyan">KRONK</Text>
-      <Text> {viewNames[view]} </Text>
+      <Box>
+        <Text> {viewNames[view]} </Text>
+        {debugMode && <Text color="magenta">[DEBUG]</Text>}
+      </Box>
       <Box>
         <Text color={stateColors[state] ?? 'white'}>
           {state === 'idle' ? '●' : '◉'} {state}

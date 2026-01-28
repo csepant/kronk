@@ -26,6 +26,7 @@
  *   llm: myLLMProvider,
  *   embedder,
  * });
+ * await agent.initialize(); // Register core tools
  *
  * // Run
  * const result = await agent.run('Help me plan a project');

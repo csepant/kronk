@@ -9,6 +9,7 @@ import type { Agent, AgentState, RunResult } from '../../core/agent.js';
 import type { JournalEntry } from '../../journal/manager.js';
 import type { QueueManager } from '../../queue/manager.js';
 import type { MemoryStats, QueueStats } from '../components/Dashboard.js';
+import type { ToolCall } from '../components/ToolOutput.js';
 
 export interface UseAgentState {
   state: AgentState;
@@ -21,8 +22,10 @@ export interface UseAgentState {
   recentJournal: JournalEntry[];
   lastResponse: string | null;
   lastResult: RunResult | null;
+  toolCalls: ToolCall[];
   runMessage: (message: string) => Promise<void>;
   refresh: () => Promise<void>;
+  clearToolCalls: () => void;
 }
 
 export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
@@ -36,6 +39,17 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
   const [recentJournal, setRecentJournal] = useState<JournalEntry[]>([]);
   const [lastResponse, setLastResponse] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<RunResult | null>(null);
+  const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
+
+  // Generate unique ID for tool calls
+  const generateToolId = useCallback(() => {
+    return `tool-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }, []);
+
+  // Clear tool calls (typically when starting a new message)
+  const clearToolCalls = useCallback(() => {
+    setToolCalls([]);
+  }, []);
 
   // Load initial data
   const loadData = useCallback(async () => {
@@ -103,6 +117,49 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
       setIsThinking(false);
     };
 
+    // Tool invocation events
+    const handleToolInvoke = (
+      name: string,
+      params: Record<string, unknown>,
+      phase: 'start' | 'end',
+      result?: unknown
+    ) => {
+      if (phase === 'start') {
+        // Add new tool call in running state
+        const newToolCall: ToolCall = {
+          id: generateToolId(),
+          name,
+          params,
+          status: 'running',
+          timestamp: new Date(),
+        };
+        setToolCalls((prev) => [...prev, newToolCall]);
+      } else {
+        // Update the most recent matching tool call with result
+        setToolCalls((prev) => {
+          // Find last matching index (ES2023 findLastIndex polyfill)
+          let lastMatchIndex = -1;
+          for (let i = prev.length - 1; i >= 0; i--) {
+            if (prev[i].name === name && prev[i].status === 'running') {
+              lastMatchIndex = i;
+              break;
+            }
+          }
+          if (lastMatchIndex === -1) return prev;
+
+          const updated = [...prev];
+          const resultObj = result as { error?: string } | undefined;
+          updated[lastMatchIndex] = {
+            ...updated[lastMatchIndex],
+            status: resultObj?.error ? 'error' : 'complete',
+            result: resultObj?.error ? undefined : result,
+            error: resultObj?.error,
+          };
+          return updated;
+        });
+      }
+    };
+
     agent.on('state:change', handleStateChange);
     agent.on('journal:entry', handleJournalEntry);
     agent.on('run:complete', handleRunComplete);
@@ -110,6 +167,7 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
     agent.on('thinking:start', handleThinkingStart);
     agent.on('thinking:chunk', handleThinkingChunk);
     agent.on('thinking:complete', handleThinkingComplete);
+    agent.on('tool:invoke', handleToolInvoke);
 
     // Queue events
     if (queue) {
@@ -144,10 +202,11 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
       agent.removeListener('thinking:start', handleThinkingStart);
       agent.removeListener('thinking:chunk', handleThinkingChunk);
       agent.removeListener('thinking:complete', handleThinkingComplete);
+      agent.removeListener('tool:invoke', handleToolInvoke);
       clearInterval(uptimeInterval);
       clearInterval(refreshInterval);
     };
-  }, [agent, queue, loadData]);
+  }, [agent, queue, loadData, generateToolId]);
 
   // Run a message through the agent
   const runMessage = useCallback(async (message: string) => {
@@ -157,6 +216,7 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
 
     setIsRunning(true);
     setLastResponse(null);
+    setToolCalls([]); // Clear tool calls for new message
 
     try {
       const result = await agent.run(message);
@@ -186,7 +246,9 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
     recentJournal,
     lastResponse,
     lastResult,
+    toolCalls,
     runMessage,
     refresh: loadData,
+    clearToolCalls,
   };
 }

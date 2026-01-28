@@ -392,6 +392,8 @@ program
       }
 
       const agent = new Agent(instance, { llm, embedder });
+      await agent.initialize();
+
       const queue = new QueueManager(instance.db);
 
       queue.start();
@@ -482,6 +484,7 @@ program
         }
 
         const agent = new Agent(instance, { llm, embedder });
+        await agent.initialize();
         console.log('🤖 Chat mode. Type "exit" to quit.\n');
 
         const readline = await import('node:readline');

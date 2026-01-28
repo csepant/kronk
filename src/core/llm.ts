@@ -4,6 +4,8 @@
  * Implementations for LLM completions supporting various backends.
  */
 
+import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import type { LLMProvider, Message, StreamChunk } from './agent.js';
 import type { Tool } from '../tools/manager.js';
 
@@ -216,13 +218,12 @@ export class OllamaLLM implements LLMProvider {
 }
 
 /**
- * OpenAI-compatible LLM provider
+ * OpenAI-compatible LLM provider using official SDK
  * Works with OpenAI API and compatible endpoints (Azure, local proxies, etc.)
  */
 export class OpenAILLM implements LLMProvider {
-  private apiKey: string;
+  private client: OpenAI;
   private model: string;
-  private baseUrl: string;
   private temperature: number;
   private maxTokens: number;
 
@@ -233,9 +234,11 @@ export class OpenAILLM implements LLMProvider {
     temperature?: number;
     maxTokens?: number;
   }) {
-    this.apiKey = options.apiKey;
+    this.client = new OpenAI({
+      apiKey: options.apiKey,
+      baseURL: options.baseUrl,
+    });
     this.model = options.model ?? 'gpt-4o';
-    this.baseUrl = options.baseUrl ?? 'https://api.openai.com/v1';
     this.temperature = options.temperature ?? 1;
     this.maxTokens = options.maxTokens ?? 4096;
   }
@@ -249,70 +252,66 @@ export class OpenAILLM implements LLMProvider {
     }
   ): Promise<{
     content: string;
-    toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+    toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
     tokensUsed: number;
   }> {
     const temperature = options?.temperature ?? this.temperature;
     const maxTokens = options?.maxTokens ?? this.maxTokens;
 
-    const body: Record<string, unknown> = {
-      model: this.model,
-      messages,
-      temperature,
-      max_completion_tokens: maxTokens,
-    };
-
-    // Add tools if provided
-    if (options?.tools && options.tools.length > 0) {
-      body.tools = options.tools.map((tool) => ({
-        type: 'function',
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.schema,
-        },
-      }));
-    }
-
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
+    // Convert messages to OpenAI format
+    const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = messages.map((m) => {
+      if (m.role === 'tool' && m.tool_call_id) {
+        return {
+          role: 'tool' as const,
+          tool_call_id: m.tool_call_id,
+          content: m.content ?? '',
+        };
+      }
+      if (m.role === 'assistant' && m.tool_calls) {
+        return {
+          role: 'assistant' as const,
+          content: m.content,
+          tool_calls: m.tool_calls.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(tc.arguments),
+            },
+          })),
+        };
+      }
+      return {
+        role: m.role as 'system' | 'user' | 'assistant',
+        content: m.content ?? '',
+      };
     });
 
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`OpenAI API error: ${error}`);
-    }
+    // Build tools array if provided
+    const tools = options?.tools?.map((tool) => ({
+      type: 'function' as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.schema as unknown as Record<string, unknown>,
+      },
+    }));
 
-    const data = (await response.json()) as {
-      choices: Array<{
-        message: {
-          content: string | null;
-          tool_calls?: Array<{
-            function: {
-              name: string;
-              arguments: string;
-            };
-          }>;
-        };
-      }>;
-      usage: {
-        prompt_tokens: number;
-        completion_tokens: number;
-        total_tokens: number;
-      };
-    };
+    const response = await this.client.chat.completions.create({
+      model: this.model,
+      messages: openaiMessages,
+      temperature,
+      max_completion_tokens: maxTokens,
+      ...(tools && tools.length > 0 ? { tools } : {}),
+    });
 
-    const choice = data.choices[0];
+    const choice = response.choices[0];
 
     // Parse tool calls if present
-    let toolCalls: Array<{ name: string; arguments: Record<string, unknown> }> | undefined;
+    let toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> | undefined;
     if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
       toolCalls = choice.message.tool_calls.map((tc) => ({
+        id: tc.id,
         name: tc.function.name,
         arguments: JSON.parse(tc.function.arguments),
       }));
@@ -321,7 +320,7 @@ export class OpenAILLM implements LLMProvider {
     return {
       content: choice.message.content ?? '',
       toolCalls,
-      tokensUsed: data.usage.total_tokens,
+      tokensUsed: response.usage?.total_tokens ?? 0,
     };
   }
 
@@ -336,101 +335,85 @@ export class OpenAILLM implements LLMProvider {
     const temperature = options?.temperature ?? this.temperature;
     const maxTokens = options?.maxTokens ?? this.maxTokens;
 
-    const body: Record<string, unknown> = {
+    // Convert messages to OpenAI format
+    const openaiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = messages.map((m) => {
+      if (m.role === 'tool' && m.tool_call_id) {
+        return {
+          role: 'tool' as const,
+          tool_call_id: m.tool_call_id,
+          content: m.content ?? '',
+        };
+      }
+      if (m.role === 'assistant' && m.tool_calls) {
+        return {
+          role: 'assistant' as const,
+          content: m.content,
+          tool_calls: m.tool_calls.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(tc.arguments),
+            },
+          })),
+        };
+      }
+      return {
+        role: m.role as 'system' | 'user' | 'assistant',
+        content: m.content ?? '',
+      };
+    });
+
+    // Build tools array if provided
+    const tools = options?.tools?.map((tool) => ({
+      type: 'function' as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.schema as unknown as Record<string, unknown>,
+      },
+    }));
+
+    const stream = await this.client.chat.completions.create({
       model: this.model,
-      messages,
+      messages: openaiMessages,
       temperature,
       max_completion_tokens: maxTokens,
       stream: true,
       stream_options: { include_usage: true },
-    };
-
-    if (options?.tools && options.tools.length > 0) {
-      body.tools = options.tools.map((tool) => ({
-        type: 'function',
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.schema,
-        },
-      }));
-    }
-
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
+      ...(tools && tools.length > 0 ? { tools } : {}),
     });
 
-    if (!response.ok) {
-      throw new Error(`OpenAI API error: ${await response.text()}`);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('No response body');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
     let totalTokens = 0;
-    const toolCallsInProgress: Map<number, { name: string; arguments: string }> = new Map();
+    const toolCallsInProgress: Map<number, { id: string; name: string; arguments: string }> = new Map();
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    for await (const chunk of stream) {
+      const delta = chunk.choices?.[0]?.delta;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+      if (delta?.content) {
+        yield { type: 'chunk', content: delta.content };
+      }
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const jsonStr = line.slice(6);
-        if (jsonStr === '[DONE]') continue;
-
-        try {
-          const data = JSON.parse(jsonStr) as {
-            choices?: Array<{
-              delta?: {
-                content?: string;
-                tool_calls?: Array<{
-                  index: number;
-                  function?: { name?: string; arguments?: string };
-                }>;
-              };
-            }>;
-            usage?: { total_tokens: number };
-          };
-
-          const delta = data.choices?.[0]?.delta;
-          if (delta?.content) {
-            yield { type: 'chunk', content: delta.content };
+      // Handle streaming tool calls
+      if (delta?.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const existing = toolCallsInProgress.get(tc.index);
+          if (!existing) {
+            toolCallsInProgress.set(tc.index, {
+              id: tc.id ?? '',
+              name: tc.function?.name ?? '',
+              arguments: tc.function?.arguments ?? '',
+            });
+          } else {
+            if (tc.id) existing.id = tc.id;
+            if (tc.function?.name) existing.name = tc.function.name;
+            if (tc.function?.arguments) existing.arguments += tc.function.arguments;
           }
-
-          // Handle streaming tool calls
-          if (delta?.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              const existing = toolCallsInProgress.get(tc.index);
-              if (!existing) {
-                toolCallsInProgress.set(tc.index, {
-                  name: tc.function?.name ?? '',
-                  arguments: tc.function?.arguments ?? '',
-                });
-              } else {
-                if (tc.function?.name) existing.name = tc.function.name;
-                if (tc.function?.arguments) existing.arguments += tc.function.arguments;
-              }
-            }
-          }
-
-          if (data.usage) {
-            totalTokens = data.usage.total_tokens;
-          }
-        } catch {
-          // Ignore parse errors
         }
+      }
+
+      if (chunk.usage) {
+        totalTokens = chunk.usage.total_tokens;
       }
     }
 
@@ -440,7 +423,7 @@ export class OpenAILLM implements LLMProvider {
         try {
           yield {
             type: 'tool_call',
-            toolCall: { name: tc.name, arguments: JSON.parse(tc.arguments) },
+            toolCall: { id: tc.id, name: tc.name, arguments: JSON.parse(tc.arguments) },
           };
         } catch {
           // Ignore malformed tool calls
@@ -453,12 +436,11 @@ export class OpenAILLM implements LLMProvider {
 }
 
 /**
- * Anthropic Claude LLM provider
+ * Anthropic Claude LLM provider using official SDK
  */
 export class AnthropicLLM implements LLMProvider {
-  private apiKey: string;
+  private client: Anthropic;
   private model: string;
-  private baseUrl: string;
   private temperature: number;
   private maxTokens: number;
 
@@ -469,9 +451,11 @@ export class AnthropicLLM implements LLMProvider {
     temperature?: number;
     maxTokens?: number;
   }) {
-    this.apiKey = options.apiKey;
+    this.client = new Anthropic({
+      apiKey: options.apiKey,
+      baseURL: options.baseUrl,
+    });
     this.model = options.model ?? 'claude-sonnet-4-20250514';
-    this.baseUrl = options.baseUrl ?? 'https://api.anthropic.com';
     this.temperature = options.temperature ?? 0.7;
     this.maxTokens = options.maxTokens ?? 4096;
   }
@@ -485,7 +469,7 @@ export class AnthropicLLM implements LLMProvider {
     }
   ): Promise<{
     content: string;
-    toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
+    toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
     tokensUsed: number;
   }> {
     const temperature = options?.temperature ?? this.temperature;
@@ -493,70 +477,73 @@ export class AnthropicLLM implements LLMProvider {
 
     // Extract system message if present
     const systemMessage = messages.find((m) => m.role === 'system');
-    const conversationMessages = messages
-      .filter((m) => m.role !== 'system')
-      .map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-      }));
 
-    const body: Record<string, unknown> = {
+    // Convert messages to Anthropic format
+    const anthropicMessages: Anthropic.MessageParam[] = [];
+    for (const m of messages) {
+      if (m.role === 'system') continue;
+
+      if (m.role === 'assistant' && m.tool_calls) {
+        // Assistant message with tool use
+        const content: Anthropic.ContentBlockParam[] = [];
+        if (m.content) {
+          content.push({ type: 'text', text: m.content });
+        }
+        for (const tc of m.tool_calls) {
+          content.push({
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.name,
+            input: tc.arguments as Record<string, unknown>,
+          });
+        }
+        anthropicMessages.push({ role: 'assistant', content });
+      } else if (m.role === 'tool' && m.tool_call_id) {
+        // Tool result message - must be inside a user message
+        anthropicMessages.push({
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: m.tool_call_id,
+            content: m.content ?? '',
+          }],
+        });
+      } else {
+        anthropicMessages.push({
+          role: m.role as 'user' | 'assistant',
+          content: m.content ?? '',
+        });
+      }
+    }
+
+    // Build tools array if provided
+    const tools = options?.tools?.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.schema as Anthropic.Tool.InputSchema,
+    }));
+
+    const response = await this.client.messages.create({
       model: this.model,
       max_tokens: maxTokens,
       temperature,
-      messages: conversationMessages,
-    };
-
-    if (systemMessage) {
-      body.system = systemMessage.content;
-    }
-
-    // Add tools if provided
-    if (options?.tools && options.tools.length > 0) {
-      body.tools = options.tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        input_schema: tool.schema,
-      }));
-    }
-
-    const response = await fetch(`${this.baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.apiKey,
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(body),
+      ...(systemMessage?.content ? { system: systemMessage.content } : {}),
+      messages: anthropicMessages,
+      ...(tools && tools.length > 0 ? { tools } : {}),
     });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Anthropic API error: ${error}`);
-    }
-
-    const data = (await response.json()) as {
-      content: Array<
-        | { type: 'text'; text: string }
-        | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-      >;
-      usage: {
-        input_tokens: number;
-        output_tokens: number;
-      };
-    };
 
     // Extract text content and tool uses
     let content = '';
-    const toolCalls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
+    const toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
 
-    for (const block of data.content) {
+    for (const block of response.content) {
       if (block.type === 'text') {
         content += block.text;
       } else if (block.type === 'tool_use') {
         toolCalls.push({
+          id: block.id,
           name: block.name,
-          arguments: block.input,
+          arguments: block.input as Record<string, unknown>,
         });
       }
     }
@@ -564,7 +551,7 @@ export class AnthropicLLM implements LLMProvider {
     return {
       content,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-      tokensUsed: data.usage.input_tokens + data.usage.output_tokens,
+      tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
     };
   }
 
@@ -579,106 +566,99 @@ export class AnthropicLLM implements LLMProvider {
     const temperature = options?.temperature ?? this.temperature;
     const maxTokens = options?.maxTokens ?? this.maxTokens;
 
+    // Extract system message if present
     const systemMessage = messages.find((m) => m.role === 'system');
-    const conversationMessages = messages
-      .filter((m) => m.role !== 'system')
-      .map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-      }));
 
-    const body: Record<string, unknown> = {
+    // Convert messages to Anthropic format
+    const anthropicMessages: Anthropic.MessageParam[] = [];
+    for (const m of messages) {
+      if (m.role === 'system') continue;
+
+      if (m.role === 'assistant' && m.tool_calls) {
+        const content: Anthropic.ContentBlockParam[] = [];
+        if (m.content) {
+          content.push({ type: 'text', text: m.content });
+        }
+        for (const tc of m.tool_calls) {
+          content.push({
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.name,
+            input: tc.arguments as Record<string, unknown>,
+          });
+        }
+        anthropicMessages.push({ role: 'assistant', content });
+      } else if (m.role === 'tool' && m.tool_call_id) {
+        anthropicMessages.push({
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: m.tool_call_id,
+            content: m.content ?? '',
+          }],
+        });
+      } else {
+        anthropicMessages.push({
+          role: m.role as 'user' | 'assistant',
+          content: m.content ?? '',
+        });
+      }
+    }
+
+    // Build tools array if provided
+    const tools = options?.tools?.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.schema as Anthropic.Tool.InputSchema,
+    }));
+
+    const stream = this.client.messages.stream({
       model: this.model,
       max_tokens: maxTokens,
       temperature,
-      messages: conversationMessages,
-      stream: true,
-    };
-
-    if (systemMessage) {
-      body.system = systemMessage.content;
-    }
-
-    if (options?.tools && options.tools.length > 0) {
-      body.tools = options.tools.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        input_schema: tool.schema,
-      }));
-    }
-
-    const response = await fetch(`${this.baseUrl}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.apiKey,
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(body),
+      ...(systemMessage?.content ? { system: systemMessage.content } : {}),
+      messages: anthropicMessages,
+      ...(tools && tools.length > 0 ? { tools } : {}),
     });
 
-    if (!response.ok) {
-      throw new Error(`Anthropic API error: ${await response.text()}`);
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('No response body');
-
-    const decoder = new TextDecoder();
-    let buffer = '';
     let totalTokens = 0;
-    let currentToolUse: { name: string; inputJson: string } | null = null;
+    let currentToolUse: { id: string; name: string; inputJson: string } | null = null;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const jsonStr = line.slice(6);
-
-        try {
-          const event = JSON.parse(jsonStr) as {
-            type: string;
-            index?: number;
-            delta?: { type: string; text?: string; partial_json?: string };
-            content_block?: { type: string; name?: string };
-            message?: { usage?: { input_tokens: number; output_tokens: number } };
-            usage?: { input_tokens?: number; output_tokens?: number };
-          };
-
-          if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
-            currentToolUse = { name: event.content_block.name ?? '', inputJson: '' };
-          } else if (event.type === 'content_block_delta') {
-            if (event.delta?.type === 'text_delta' && event.delta.text) {
-              yield { type: 'chunk', content: event.delta.text };
-            } else if (event.delta?.type === 'input_json_delta' && event.delta.partial_json && currentToolUse) {
-              currentToolUse.inputJson += event.delta.partial_json;
-            }
-          } else if (event.type === 'content_block_stop' && currentToolUse) {
-            try {
-              yield {
-                type: 'tool_call',
-                toolCall: { name: currentToolUse.name, arguments: JSON.parse(currentToolUse.inputJson || '{}') },
-              };
-            } catch {
-              // Ignore malformed tool calls
-            }
-            currentToolUse = null;
-          } else if (event.type === 'message_delta' && event.usage) {
-            totalTokens = (event.usage.input_tokens ?? 0) + (event.usage.output_tokens ?? 0);
-          } else if (event.type === 'message_stop') {
-            // End of message
-          }
-        } catch {
-          // Ignore parse errors
+    for await (const event of stream) {
+      if (event.type === 'content_block_start') {
+        const block = event.content_block;
+        if (block.type === 'tool_use') {
+          currentToolUse = { id: block.id, name: block.name, inputJson: '' };
         }
+      } else if (event.type === 'content_block_delta') {
+        const delta = event.delta;
+        if (delta.type === 'text_delta') {
+          yield { type: 'chunk', content: delta.text };
+        } else if (delta.type === 'input_json_delta' && currentToolUse) {
+          currentToolUse.inputJson += delta.partial_json;
+        }
+      } else if (event.type === 'content_block_stop' && currentToolUse) {
+        try {
+          yield {
+            type: 'tool_call',
+            toolCall: {
+              id: currentToolUse.id,
+              name: currentToolUse.name,
+              arguments: JSON.parse(currentToolUse.inputJson || '{}'),
+            },
+          };
+        } catch {
+          // Ignore malformed tool calls
+        }
+        currentToolUse = null;
+      } else if (event.type === 'message_delta' && event.usage) {
+        totalTokens = event.usage.output_tokens;
       }
     }
+
+    // Get final usage from the stream
+    const finalMessage = await stream.finalMessage();
+    totalTokens = finalMessage.usage.input_tokens + finalMessage.usage.output_tokens;
 
     yield { type: 'done', tokensUsed: totalTokens };
   }
