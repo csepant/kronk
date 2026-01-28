@@ -11,6 +11,9 @@ import Spinner from 'ink-spinner';
 import type { Agent, RunResult } from '../../core/agent.js';
 import { ToolOutput, type ToolCall } from './ToolOutput.js';
 import { Markdown } from './Markdown.js';
+import { ShellConfirmDialog } from './ShellConfirmDialog.js';
+import type { MessageManager } from '../../messages/manager.js';
+import type { PendingShellConfirm } from '../hooks/useAgent.js';
 
 export interface ChatProps {
   agent: Agent;
@@ -22,6 +25,9 @@ export interface ChatProps {
   toolCalls?: ToolCall[];
   debugMode?: boolean;
   lastResult?: RunResult | null;
+  messageManager?: MessageManager;
+  pendingShellConfirm?: PendingShellConfirm | null;
+  onShellConfirm?: (approved: boolean) => void;
 }
 
 interface ChatMessage {
@@ -42,11 +48,15 @@ export function Chat({
   toolCalls = [],
   debugMode = false,
   lastResult,
+  messageManager,
+  pendingShellConfirm,
+  onShellConfirm,
 }: ChatProps): React.ReactElement {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
+  const [messagesLoaded, setMessagesLoaded] = useState(false);
 
   // Tool output expansion state
   const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(new Set());
@@ -56,22 +66,50 @@ export function Chat({
   // Store previous toolCalls ref to detect new completions
   const prevToolCallsRef = React.useRef<ToolCall[]>([]);
 
+  // Load messages from database on mount
+  useEffect(() => {
+    if (messageManager && !messagesLoaded) {
+      messageManager.getRecent(50).then((records) => {
+        const loadedMessages: ChatMessage[] = records.map((record) => ({
+          role: record.role,
+          content: record.content,
+          timestamp: record.createdAt,
+          toolCalls: record.toolCalls,
+        }));
+        setMessages(loadedMessages);
+        setMessagesLoaded(true);
+      }).catch(() => {
+        // Silently fail - messages will start fresh
+        setMessagesLoaded(true);
+      });
+    }
+  }, [messageManager, messagesLoaded]);
+
   useEffect(() => {
     if (lastResponse) {
       // Capture tool calls from this response
       const responseToolCalls = [...prevToolCallsRef.current];
-      setMessages((prev) => [
-        ...prev,
-        {
+      const newMessage: ChatMessage = {
+        role: 'assistant',
+        content: lastResponse,
+        timestamp: new Date(),
+        toolCalls: responseToolCalls.length > 0 ? responseToolCalls : undefined,
+      };
+      setMessages((prev) => [...prev, newMessage]);
+      prevToolCallsRef.current = [];
+
+      // Persist to database
+      if (messageManager) {
+        messageManager.add({
           role: 'assistant',
           content: lastResponse,
-          timestamp: new Date(),
           toolCalls: responseToolCalls.length > 0 ? responseToolCalls : undefined,
-        },
-      ]);
-      prevToolCallsRef.current = [];
+        }).catch(() => {
+          // Silently fail
+        });
+      }
     }
-  }, [lastResponse]);
+  }, [lastResponse, messageManager]);
 
   // Track tool calls as they come in (before response completes)
   useEffect(() => {
@@ -170,10 +208,22 @@ export function Chat({
     setHistory((prev) => [...prev, userMessage]);
     setHistoryIndex(-1);
 
-    setMessages((prev) => [
-      ...prev,
-      { role: 'user', content: userMessage, timestamp: new Date() },
-    ]);
+    const newMessage: ChatMessage = {
+      role: 'user',
+      content: userMessage,
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, newMessage]);
+
+    // Persist to database
+    if (messageManager) {
+      messageManager.add({
+        role: 'user',
+        content: userMessage,
+      }).catch(() => {
+        // Silently fail
+      });
+    }
 
     await onMessage(userMessage);
   };
@@ -338,10 +388,21 @@ export function Chat({
         </Box>
       )}
 
+      {/* Shell Confirmation Dialog */}
+      {pendingShellConfirm && onShellConfirm && (
+        <Box marginBottom={1}>
+          <ShellConfirmDialog
+            command={pendingShellConfirm.command}
+            cwd={pendingShellConfirm.cwd}
+            onConfirm={onShellConfirm}
+          />
+        </Box>
+      )}
+
       {/* Input area */}
       <Box
         borderStyle="round"
-        borderColor={isRunning ? 'gray' : 'cyan'}
+        borderColor={isRunning ? 'gray' : (pendingShellConfirm ? 'yellow' : 'cyan')}
         paddingX={1}
       >
         <Text color="cyan">&gt; </Text>

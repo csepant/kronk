@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Box, Text, useInput, useApp } from 'ink';
+import { Box, Text, useInput, useApp, useStdout } from 'ink';
 import { Dashboard } from './components/Dashboard.js';
 import { Chat } from './components/Chat.js';
 import { Journal } from './components/Journal.js';
@@ -14,21 +14,56 @@ import { TaskQueue } from './components/TaskQueue.js';
 import { useAgent } from './hooks/useAgent.js';
 import type { Agent } from '../core/agent.js';
 import type { QueueManager } from '../queue/manager.js';
+import type { MessageManager } from '../messages/manager.js';
 
 export type ViewMode = 'dashboard' | 'chat' | 'journal' | 'memory' | 'tasks';
 
 export interface AppProps {
   agent: Agent;
   queue?: QueueManager;
+  messageManager?: MessageManager;
+  allowShell?: boolean;
   initialView?: ViewMode;
 }
 
-export function App({ agent, queue, initialView = 'dashboard' }: AppProps): React.ReactElement {
+export function App({ agent, queue, messageManager, allowShell, initialView = 'dashboard' }: AppProps): React.ReactElement {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const [view, setView] = useState<ViewMode>(initialView);
   const [showHelp, setShowHelp] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
+  const [dimensions, setDimensions] = useState({
+    height: stdout?.rows ?? 24,
+    width: stdout?.columns ?? 80,
+  });
   const agentState = useAgent(agent, queue);
+
+  // Track terminal dimensions for fullscreen
+  useEffect(() => {
+    const handleResize = () => {
+      setDimensions({
+        height: stdout?.rows ?? 24,
+        width: stdout?.columns ?? 80,
+      });
+    };
+    stdout?.on('resize', handleResize);
+    return () => {
+      stdout?.off('resize', handleResize);
+    };
+  }, [stdout]);
+
+  // Auto-approve shell commands if --allow-shell flag is set
+  useEffect(() => {
+    if (allowShell) {
+      const autoApprove = (event: { resolve: (approved: boolean) => void }) => {
+        event.resolve(true);
+      };
+      agent.on('shell:confirm', autoApprove);
+      return () => {
+        agent.removeListener('shell:confirm', autoApprove);
+      };
+    }
+  }, [agent, allowShell]);
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
@@ -110,7 +145,7 @@ export function App({ agent, queue, initialView = 'dashboard' }: AppProps): Reac
   }
 
   return (
-    <Box flexDirection="column" height="100%">
+    <Box flexDirection="column" height={dimensions.height} width={dimensions.width}>
       <Header view={view} state={agentState.state} debugMode={debugMode} />
 
       <Box flexGrow={1}>
@@ -134,6 +169,9 @@ export function App({ agent, queue, initialView = 'dashboard' }: AppProps): Reac
             toolCalls={agentState.toolCalls}
             debugMode={debugMode}
             lastResult={agentState.lastResult}
+            messageManager={messageManager}
+            pendingShellConfirm={agentState.pendingShellConfirm}
+            onShellConfirm={agentState.handleShellConfirm}
           />
         )}
         {view === 'journal' && (

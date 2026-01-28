@@ -15,6 +15,7 @@ import { DEFAULT_CONSTITUTION } from '../db/schema.js';
 import { MemoryManager } from '../memory/manager.js';
 import { ToolsManager } from '../tools/manager.js';
 import { JournalManager } from '../journal/manager.js';
+import { MessageManager } from '../messages/manager.js';
 
 export interface KronkConfig {
   /** Name of this agent instance */
@@ -90,6 +91,7 @@ export interface KronkInstance {
   memory: MemoryManager;
   tools: ToolsManager;
   journal: JournalManager;
+  messages: MessageManager;
   paths: {
     root: string;
     db: string;
@@ -179,6 +181,7 @@ export async function init(
   const memory = new MemoryManager(db);
   const tools = new ToolsManager(db);
   const journal = new JournalManager(db);
+  const messages = new MessageManager(db);
 
   // Store constitution as system2 memory
   await memory.store({
@@ -221,6 +224,7 @@ how to accomplish tasks in specific domains (e.g., git operations, file manageme
     memory,
     tools,
     journal,
+    messages,
     paths,
   };
 }
@@ -264,6 +268,7 @@ export async function load(basePath?: string): Promise<KronkInstance> {
   const memory = new MemoryManager(db);
   const tools = new ToolsManager(db);
   const journal = new JournalManager(db);
+  const messages = new MessageManager(db);
 
   return {
     config,
@@ -271,6 +276,7 @@ export async function load(basePath?: string): Promise<KronkInstance> {
     memory,
     tools,
     journal,
+    messages,
     paths,
   };
 }

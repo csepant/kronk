@@ -8,7 +8,7 @@
  */
 
 import type { KronkDatabase } from '../db/client.js';
-import { MEMORY_TIERS, type MemoryTier, VECTOR_DIMENSIONS } from '../db/schema.js';
+import { MEMORY_TIERS, TOTAL_CONTEXT_BUDGET, type MemoryTier, VECTOR_DIMENSIONS } from '../db/schema.js';
 
 export interface Memory {
   id: string;
@@ -37,12 +37,32 @@ export interface MemoryInput {
   expiresAt?: Date;
 }
 
+export interface ConversationMessage {
+  role: 'user' | 'assistant' | 'tool';
+  content: string;
+  timestamp: Date;
+  tokens: number;
+  toolCallId?: string;
+}
+
 export interface ContextWindow {
   system2: Memory[];
   working: Memory[];
   system1: Memory[];
+  conversation: ConversationMessage[];
   totalTokens: number;
+  tierTokens: Record<MemoryTier, number>;
 }
+
+export interface TierAllocation {
+  tier: MemoryTier;
+  currentTokens: number;
+  maxTokens: number;
+  usage: number; // 0-1
+  needsSummarization: boolean;
+}
+
+export type SummarizerFunction = (content: string, targetTokens: number) => Promise<string>;
 
 export interface EmbeddingProvider {
   embed(text: string): Promise<number[]>;
@@ -59,10 +79,20 @@ function estimateTokens(text: string): number {
 export class MemoryManager {
   private db: KronkDatabase;
   private embedder?: EmbeddingProvider;
+  private conversation: ConversationMessage[] = [];
+  private conversationTokens = 0;
+  private summarizer?: SummarizerFunction;
+  private tierLimits: Record<MemoryTier, number>;
 
   constructor(db: KronkDatabase, embedder?: EmbeddingProvider) {
     this.db = db;
     this.embedder = embedder;
+    // Initialize with default tier limits
+    this.tierLimits = {
+      system2: MEMORY_TIERS.system2.maxTokens,
+      working: MEMORY_TIERS.working.maxTokens,
+      system1: MEMORY_TIERS.system1.maxTokens,
+    };
   }
 
   /**
@@ -70,6 +100,249 @@ export class MemoryManager {
    */
   setEmbedder(embedder: EmbeddingProvider): void {
     this.embedder = embedder;
+  }
+
+  /**
+   * Set the summarizer function for dynamic memory compression
+   */
+  setSummarizer(summarizer: SummarizerFunction): void {
+    this.summarizer = summarizer;
+  }
+
+  /**
+   * Add a message to the conversation history (stored in working memory)
+   */
+  addConversationMessage(
+    role: ConversationMessage['role'],
+    content: string,
+    toolCallId?: string
+  ): void {
+    const tokens = estimateTokens(content);
+    this.conversation.push({
+      role,
+      content,
+      timestamp: new Date(),
+      tokens,
+      toolCallId,
+    });
+    this.conversationTokens += tokens;
+  }
+
+  /**
+   * Get the current conversation history
+   */
+  getConversation(): ConversationMessage[] {
+    return [...this.conversation];
+  }
+
+  /**
+   * Get current conversation token count
+   */
+  getConversationTokens(): number {
+    return this.conversationTokens;
+  }
+
+  /**
+   * Clear conversation history (e.g., at session end)
+   */
+  clearConversation(): void {
+    this.conversation = [];
+    this.conversationTokens = 0;
+  }
+
+  /**
+   * Get tier allocation status for dynamic management
+   */
+  async getTierAllocations(): Promise<TierAllocation[]> {
+    const stats = await this.getStats();
+    const allocations: TierAllocation[] = [];
+
+    for (const tier of ['system2', 'working', 'system1'] as MemoryTier[]) {
+      const config = MEMORY_TIERS[tier];
+      const currentTokens = stats[tier].totalTokens +
+        (tier === 'working' ? this.conversationTokens : 0);
+      const maxTokens = this.tierLimits[tier];
+      const usage = currentTokens / maxTokens;
+
+      allocations.push({
+        tier,
+        currentTokens,
+        maxTokens,
+        usage,
+        needsSummarization: usage >= config.summarizationTrigger,
+      });
+    }
+
+    return allocations;
+  }
+
+  /**
+   * Resize tier limits dynamically based on usage patterns
+   * Redistributes tokens from underutilized tiers to overutilized ones
+   */
+  async resizeTiers(options: {
+    preserveMinimums?: boolean;
+    totalBudget?: number;
+  } = {}): Promise<Record<MemoryTier, number>> {
+    const { preserveMinimums = true, totalBudget = TOTAL_CONTEXT_BUDGET * 0.75 } = options;
+    const allocations = await this.getTierAllocations();
+
+    // Calculate how much each tier actually needs
+    const needs: Record<MemoryTier, number> = {
+      system2: 0,
+      working: 0,
+      system1: 0,
+    };
+
+    for (const alloc of allocations) {
+      const config = MEMORY_TIERS[alloc.tier];
+      const minTokens = preserveMinimums ? config.minTokens : 0;
+
+      if (alloc.usage > 0.9) {
+        // Tier is nearly full, request more
+        needs[alloc.tier] = Math.max(alloc.currentTokens * 1.2, minTokens);
+      } else if (alloc.usage > 0.5) {
+        // Moderate usage, keep current allocation
+        needs[alloc.tier] = Math.max(alloc.maxTokens, minTokens);
+      } else {
+        // Low usage, can give up some space
+        needs[alloc.tier] = Math.max(alloc.currentTokens * 1.5, minTokens);
+      }
+    }
+
+    // Normalize to fit within budget
+    const totalNeeded = needs.system2 + needs.working + needs.system1;
+    const scale = totalBudget / totalNeeded;
+
+    for (const tier of ['system2', 'working', 'system1'] as MemoryTier[]) {
+      const config = MEMORY_TIERS[tier];
+      const scaled = Math.floor(needs[tier] * scale);
+      this.tierLimits[tier] = preserveMinimums
+        ? Math.max(scaled, config.minTokens)
+        : scaled;
+    }
+
+    return { ...this.tierLimits };
+  }
+
+  /**
+   * Summarize conversation history to reduce token count
+   * Keeps recent messages intact and summarizes older ones
+   */
+  async summarizeConversation(options: {
+    keepRecentCount?: number;
+    targetTokens?: number;
+  } = {}): Promise<{ summarized: number; newTokens: number }> {
+    if (!this.summarizer) {
+      throw new Error('Summarizer not set. Call setSummarizer() first.');
+    }
+
+    const { keepRecentCount = 4, targetTokens } = options;
+    const target = targetTokens ?? Math.floor(this.tierLimits.working * 0.5);
+
+    if (this.conversation.length <= keepRecentCount) {
+      return { summarized: 0, newTokens: this.conversationTokens };
+    }
+
+    // Split into messages to summarize and messages to keep
+    const toSummarize = this.conversation.slice(0, -keepRecentCount);
+    const toKeep = this.conversation.slice(-keepRecentCount);
+
+    if (toSummarize.length === 0) {
+      return { summarized: 0, newTokens: this.conversationTokens };
+    }
+
+    // Format messages for summarization
+    const conversationText = toSummarize
+      .map(m => `${m.role}: ${m.content}`)
+      .join('\n\n');
+
+    const tokensToSummarize = toSummarize.reduce((sum, m) => sum + m.tokens, 0);
+    const summaryTargetTokens = Math.floor(tokensToSummarize * 0.3); // Compress to ~30%
+
+    // Generate summary
+    const summary = await this.summarizer(conversationText, summaryTargetTokens);
+    const summaryTokens = estimateTokens(summary);
+
+    // Replace old messages with summary
+    this.conversation = [
+      {
+        role: 'assistant',
+        content: `[Previous conversation summary]\n${summary}`,
+        timestamp: toSummarize[toSummarize.length - 1].timestamp,
+        tokens: summaryTokens,
+      },
+      ...toKeep,
+    ];
+
+    // Recalculate total tokens
+    this.conversationTokens = this.conversation.reduce((sum, m) => sum + m.tokens, 0);
+
+    return {
+      summarized: toSummarize.length,
+      newTokens: this.conversationTokens,
+    };
+  }
+
+  /**
+   * Automatically manage memory tiers - summarize if over threshold
+   */
+  async autoManage(): Promise<{
+    conversationSummarized: boolean;
+    tiersResized: boolean;
+    tiersSummarized: MemoryTier[];
+  }> {
+    const result = {
+      conversationSummarized: false,
+      tiersResized: false,
+      tiersSummarized: [] as MemoryTier[],
+    };
+
+    const allocations = await this.getTierAllocations();
+
+    // Check if any tier needs summarization
+    const overThreshold = allocations.filter(a => a.needsSummarization);
+
+    if (overThreshold.length > 0) {
+      // Resize tiers to redistribute space
+      await this.resizeTiers();
+      result.tiersResized = true;
+
+      // Check if working memory (conversation) needs summarization
+      const workingAlloc = allocations.find(a => a.tier === 'working');
+      if (workingAlloc?.needsSummarization && this.summarizer) {
+        await this.summarizeConversation();
+        result.conversationSummarized = true;
+      }
+
+      // Note: Tier memory summarization is handled by consolidate()
+      // which requires the caller to provide a summarizer for persistence
+      for (const alloc of overThreshold) {
+        if (alloc.tier !== 'working') {
+          result.tiersSummarized.push(alloc.tier);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Get current tier limits
+   */
+  getTierLimits(): Record<MemoryTier, number> {
+    return { ...this.tierLimits };
+  }
+
+  /**
+   * Set custom tier limits
+   */
+  setTierLimits(limits: Partial<Record<MemoryTier, number>>): void {
+    for (const [tier, limit] of Object.entries(limits)) {
+      if (tier in this.tierLimits && typeof limit === 'number') {
+        this.tierLimits[tier as MemoryTier] = limit;
+      }
+    }
   }
 
   /**
@@ -291,19 +564,30 @@ export class MemoryManager {
 
   /**
    * Build the current context window from all memory tiers
+   * Includes conversation history in working memory
    */
   async buildContextWindow(): Promise<ContextWindow> {
     const context: ContextWindow = {
       system2: [],
       working: [],
       system1: [],
+      conversation: [...this.conversation],
       totalTokens: 0,
+      tierTokens: {
+        system2: 0,
+        working: 0,
+        system1: 0,
+      },
     };
 
-    // Fetch memories for each tier, respecting token limits
+    // Fetch memories for each tier, respecting dynamic token limits
     for (const tier of ['system2', 'working', 'system1'] as MemoryTier[]) {
-      const tierConfig = MEMORY_TIERS[tier];
+      const tierLimit = this.tierLimits[tier];
       let tierTokens = 0;
+
+      // For working memory, account for conversation tokens first
+      const reservedTokens = tier === 'working' ? this.conversationTokens : 0;
+      const availableTokens = tierLimit - reservedTokens;
 
       // Query memories ordered by importance and recency
       const sql = `
@@ -320,14 +604,15 @@ export class MemoryManager {
         const content = memory.summary ?? memory.content;
         const tokens = estimateTokens(content);
 
-        // Stop if we'd exceed tier limit
-        if (tierTokens + tokens > tierConfig.maxTokens) break;
+        // Stop if we'd exceed available tier limit
+        if (tierTokens + tokens > availableTokens) break;
 
         context[tier].push(memory);
         tierTokens += tokens;
       }
 
-      context.totalTokens += tierTokens;
+      context.tierTokens[tier] = tierTokens + reservedTokens;
+      context.totalTokens += tierTokens + reservedTokens;
     }
 
     return context;
@@ -347,6 +632,14 @@ export class MemoryManager {
     if (context.working.length > 0) {
       sections.push('\n## Working Memory (Current Tasks)\n');
       sections.push(context.working.map(m => `- ${m.summary ?? m.content}`).join('\n'));
+    }
+
+    if (context.conversation.length > 0) {
+      sections.push('\n## Conversation History\n');
+      sections.push(context.conversation.map(m => {
+        const roleLabel = m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : 'Tool';
+        return `**${roleLabel}**: ${m.content}`;
+      }).join('\n\n'));
     }
 
     if (context.system1.length > 0) {

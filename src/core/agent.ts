@@ -8,7 +8,7 @@
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import type { KronkInstance, KronkConfig } from '../init/index.js';
-import type { Memory, ContextWindow, EmbeddingProvider } from '../memory/manager.js';
+import type { Memory, ContextWindow, EmbeddingProvider, SummarizerFunction } from '../memory/manager.js';
 import type { Tool, ToolHandler } from '../tools/manager.js';
 import type { JournalEntry } from '../journal/manager.js';
 import {
@@ -166,6 +166,30 @@ export class Agent extends EventEmitter {
       this.instance.memory.setEmbedder(this.embedder);
       this.instance.journal.setEmbedder(this.embedder);
     }
+
+    // Set up the summarizer for dynamic memory management
+    this.instance.memory.setSummarizer(this.createSummarizer());
+  }
+
+  /**
+   * Create a summarizer function that uses the LLM
+   */
+  private createSummarizer(): SummarizerFunction {
+    return async (content: string, targetTokens: number): Promise<string> => {
+      const completion = await this.llm.complete([
+        {
+          role: 'system',
+          content: `You are a summarization assistant. Summarize the following content concisely while preserving key information, decisions, and context. Target approximately ${targetTokens} tokens (about ${targetTokens * 4} characters). Focus on:
+- Key decisions made
+- Important information exchanged
+- Current state and next steps
+- Any unresolved questions or tasks`,
+        },
+        { role: 'user', content },
+      ], { maxTokens: Math.max(targetTokens * 2, 500) });
+
+      return completion.content;
+    };
   }
 
   /**
@@ -362,6 +386,9 @@ export class Agent extends EventEmitter {
       const context = await this.instance.memory.buildContextWindow();
       const tools = await this.instance.tools.listEnabled();
 
+      // Store user message in conversation history
+      this.instance.memory.addConversationMessage('user', userMessage);
+
       // Run agent loop
       const messages: Message[] = [
         { role: 'system', content: await this.buildSystemPrompt(context, tools) },
@@ -404,12 +431,21 @@ export class Agent extends EventEmitter {
             );
             this.emit('tool:invoke', toolCall.name, toolCall.arguments, 'end', toolResult);
 
+            const resultContent = JSON.stringify(toolResult.result ?? { error: toolResult.error });
+
             // Add tool result message with proper format
             messages.push({
               role: 'tool',
               tool_call_id: toolCall.id,
-              content: JSON.stringify(toolResult.result ?? { error: toolResult.error }),
+              content: resultContent,
             });
+
+            // Store tool result in conversation history
+            this.instance.memory.addConversationMessage(
+              'tool',
+              `[${toolCall.name}] ${resultContent.slice(0, 500)}${resultContent.length > 500 ? '...' : ''}`,
+              toolCall.id
+            );
           }
 
           continue; // Get next LLM response with tool results
@@ -419,7 +455,10 @@ export class Agent extends EventEmitter {
         result.response = completion.content;
         result.success = true;
 
-        // Store interaction in short-term memory
+        // Store assistant response in conversation history
+        this.instance.memory.addConversationMessage('assistant', completion.content);
+
+        // Store interaction summary in short-term memory (for search/retrieval)
         this.setState('observing');
         const memory = await this.instance.memory.store({
           tier: 'system1',
@@ -430,6 +469,9 @@ export class Agent extends EventEmitter {
         });
         result.memoriesCreated.push(memory);
         this.emit('memory:store', memory);
+
+        // Auto-manage memory if needed (summarize if over threshold)
+        await this.instance.memory.autoManage();
 
         break;
       }
@@ -545,6 +587,44 @@ export class Agent extends EventEmitter {
    */
   async recall(query: string, limit = 5): Promise<Array<Memory & { similarity: number }>> {
     return this.instance.memory.search(query, { limit });
+  }
+
+  /**
+   * Get the current conversation history
+   */
+  getConversation(): { role: string; content: string; timestamp: Date }[] {
+    return this.instance.memory.getConversation();
+  }
+
+  /**
+   * Manually trigger memory summarization/resizing
+   */
+  async manageMemory(): Promise<{
+    conversationSummarized: boolean;
+    tiersResized: boolean;
+    tiersSummarized: string[];
+  }> {
+    return this.instance.memory.autoManage();
+  }
+
+  /**
+   * Get memory allocation status
+   */
+  async getMemoryAllocations(): Promise<{
+    tier: string;
+    currentTokens: number;
+    maxTokens: number;
+    usage: number;
+    needsSummarization: boolean;
+  }[]> {
+    return this.instance.memory.getTierAllocations();
+  }
+
+  /**
+   * Clear conversation history (start fresh while keeping persistent memories)
+   */
+  clearConversation(): void {
+    this.instance.memory.clearConversation();
   }
 
   /**

@@ -8,7 +8,7 @@
  * - System 1: Short-term reactive memory (recent interactions, immediate context)
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const VECTOR_DIMENSIONS = 1536; // OpenAI ada-002 / text-embedding-3-small
 
@@ -149,6 +149,23 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+
+-- ============================================================================
+-- MESSAGES TABLE
+-- Stores chat messages for persistence across view switches
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    session_id TEXT,
+    role TEXT NOT NULL,            -- 'user', 'assistant', 'system'
+    content TEXT NOT NULL,
+    tool_calls TEXT,               -- JSON array of tool calls (for assistant messages)
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
 
 -- ============================================================================
 -- MEMORY CONSOLIDATION VIEW
@@ -343,6 +360,23 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 
 -- ============================================================================
+-- MESSAGES TABLE
+-- Stores chat messages for persistence across view switches
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    session_id TEXT,
+    role TEXT NOT NULL,            -- 'user', 'assistant', 'system'
+    content TEXT NOT NULL,
+    tool_calls TEXT,               -- JSON array of tool calls (for assistant messages)
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
+
+-- ============================================================================
 -- MEMORY CONSOLIDATION VIEW
 -- Helpful view for memory management operations
 -- ============================================================================
@@ -423,32 +457,49 @@ export function getSchemaSQL(useVectorSearch: boolean): string {
 export const SCHEMA_SQL = SCHEMA_SQL_VECTOR;
 
 /**
+ * Total context budget for the agent (default 200k)
+ * Allocated across memory tiers, system prompt, tools, and response
+ */
+export const TOTAL_CONTEXT_BUDGET = 200_000;
+
+/**
  * Memory tier constraints and configuration
+ * Optimized for 200k context window:
+ * - system2: 30k (strategic, long-term)
+ * - working: 100k (conversation history + active context)
+ * - system1: 20k (reactive, short-term)
+ * - Reserved: ~50k for system prompt, tools, and response
  */
 export const MEMORY_TIERS = {
   system2: {
     name: 'System 2 / Long Horizon',
     description: 'Strategic memory: goals, principles, learned patterns, and identity',
-    maxTokens: 4000,
+    maxTokens: 30_000,
+    minTokens: 5_000,   // Minimum allocation even under pressure
     decayRate: 0.01,    // Very slow decay
     defaultImportance: 0.8,
     consolidationThreshold: 100, // Entries before consolidation
+    summarizationTrigger: 0.9, // Trigger summarization at 90% capacity
   },
   working: {
     name: 'Working Memory / Current Tasks',
-    description: 'Active context: current objectives, in-progress work, relevant facts',
-    maxTokens: 8000,
+    description: 'Active context: conversation history, current objectives, in-progress work',
+    maxTokens: 100_000,
+    minTokens: 20_000,  // Minimum allocation even under pressure
     decayRate: 0.1,     // Moderate decay
     defaultImportance: 0.6,
     consolidationThreshold: 50,
+    summarizationTrigger: 0.85, // Trigger summarization at 85% capacity
   },
   system1: {
     name: 'System 1 / Short Term',
     description: 'Reactive memory: recent interactions, immediate context, quick responses',
-    maxTokens: 4000,
+    maxTokens: 20_000,
+    minTokens: 2_000,   // Minimum allocation even under pressure
     decayRate: 0.5,     // Fast decay
     defaultImportance: 0.3,
     consolidationThreshold: 20,
+    summarizationTrigger: 0.8, // Trigger summarization at 80% capacity
   },
 } as const;
 

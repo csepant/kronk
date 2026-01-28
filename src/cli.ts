@@ -370,6 +370,7 @@ program
   .description('Launch interactive TUI dashboard')
   .option('--provider <provider>', 'LLM provider (ollama, openai, anthropic)')
   .option('--model <model>', 'Model to use')
+  .option('--allow-shell', 'Auto-approve shell commands without confirmation')
   .action(async (options) => {
     try {
       const instance = await load();
@@ -398,11 +399,23 @@ program
 
       queue.start();
 
+      // Enter alternate screen buffer for fullscreen UI
+      process.stdout.write('\x1b[?1049h');
+      process.stdout.write('\x1b[H');
+
       const { waitUntilExit } = render(
-        React.createElement(App, { agent, queue })
+        React.createElement(App, {
+          agent,
+          queue,
+          messageManager: instance.messages,
+          allowShell: options.allowShell,
+        })
       );
 
       await waitUntilExit();
+
+      // Exit alternate screen buffer
+      process.stdout.write('\x1b[?1049l');
 
       queue.stop();
       await instance.db.close();
@@ -418,6 +431,7 @@ program
   .description('Simple REPL chat mode')
   .option('--provider <provider>', 'LLM provider (ollama, openai, anthropic)')
   .option('--model <model>', 'Model to use')
+  .option('--allow-shell', 'Auto-approve shell commands without confirmation')
   .action(async (options) => {
     try {
       const kronkPath = getKronkPath();
@@ -485,6 +499,15 @@ program
 
         const agent = new Agent(instance, { llm, embedder });
         await agent.initialize();
+
+        // Auto-approve shell commands if --allow-shell flag is set
+        if (options.allowShell) {
+          agent.on('shell:confirm', (event) => {
+            event.resolve(true);
+          });
+          console.log('Shell auto-approve enabled');
+        }
+
         console.log('🤖 Chat mode. Type "exit" to quit.\n');
 
         const readline = await import('node:readline');

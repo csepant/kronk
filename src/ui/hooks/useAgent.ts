@@ -5,11 +5,17 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import type { Agent, AgentState, RunResult } from '../../core/agent.js';
+import type { Agent, AgentState, RunResult, ShellConfirmEvent } from '../../core/agent.js';
 import type { JournalEntry } from '../../journal/manager.js';
 import type { QueueManager } from '../../queue/manager.js';
 import type { MemoryStats, QueueStats } from '../components/Dashboard.js';
 import type { ToolCall } from '../components/ToolOutput.js';
+
+export interface PendingShellConfirm {
+  command: string;
+  cwd: string;
+  resolve: (approved: boolean) => void;
+}
 
 export interface UseAgentState {
   state: AgentState;
@@ -23,9 +29,11 @@ export interface UseAgentState {
   lastResponse: string | null;
   lastResult: RunResult | null;
   toolCalls: ToolCall[];
+  pendingShellConfirm: PendingShellConfirm | null;
   runMessage: (message: string) => Promise<void>;
   refresh: () => Promise<void>;
   clearToolCalls: () => void;
+  handleShellConfirm: (approved: boolean) => void;
 }
 
 export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
@@ -40,6 +48,7 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
   const [lastResponse, setLastResponse] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<RunResult | null>(null);
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
+  const [pendingShellConfirm, setPendingShellConfirm] = useState<PendingShellConfirm | null>(null);
 
   // Generate unique ID for tool calls
   const generateToolId = useCallback(() => {
@@ -50,6 +59,14 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
   const clearToolCalls = useCallback(() => {
     setToolCalls([]);
   }, []);
+
+  // Handle shell confirmation dialog response
+  const handleShellConfirm = useCallback((approved: boolean) => {
+    if (pendingShellConfirm) {
+      pendingShellConfirm.resolve(approved);
+      setPendingShellConfirm(null);
+    }
+  }, [pendingShellConfirm]);
 
   // Load initial data
   const loadData = useCallback(async () => {
@@ -160,6 +177,15 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
       }
     };
 
+    // Shell confirmation events
+    const handleShellConfirmEvent = (event: ShellConfirmEvent) => {
+      setPendingShellConfirm({
+        command: event.command,
+        cwd: event.cwd,
+        resolve: event.resolve,
+      });
+    };
+
     agent.on('state:change', handleStateChange);
     agent.on('journal:entry', handleJournalEntry);
     agent.on('run:complete', handleRunComplete);
@@ -168,6 +194,7 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
     agent.on('thinking:chunk', handleThinkingChunk);
     agent.on('thinking:complete', handleThinkingComplete);
     agent.on('tool:invoke', handleToolInvoke);
+    agent.on('shell:confirm', handleShellConfirmEvent);
 
     // Queue events
     if (queue) {
@@ -203,6 +230,7 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
       agent.removeListener('thinking:chunk', handleThinkingChunk);
       agent.removeListener('thinking:complete', handleThinkingComplete);
       agent.removeListener('tool:invoke', handleToolInvoke);
+      agent.removeListener('shell:confirm', handleShellConfirmEvent);
       clearInterval(uptimeInterval);
       clearInterval(refreshInterval);
     };
@@ -247,8 +275,10 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
     lastResponse,
     lastResult,
     toolCalls,
+    pendingShellConfirm,
     runMessage,
     refresh: loadData,
     clearToolCalls,
+    handleShellConfirm,
   };
 }
