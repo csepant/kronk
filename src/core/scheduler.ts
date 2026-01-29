@@ -28,6 +28,10 @@ export interface SchedulerConfig {
   memoryCleanup?: string;
   /** Cron expression for memory consolidation (default: daily at midnight) */
   consolidation?: string;
+  /** Cron expression for proactive thinking (default: every 15 minutes) */
+  proactiveThink?: string;
+  /** Enable proactive thinking (default: true) */
+  enableProactive?: boolean;
   /** Custom scheduled tasks */
   customTasks?: Array<{
     name: string;
@@ -44,11 +48,34 @@ export interface SchedulerEvents {
   'scheduler:stop': () => void;
 }
 
-const DEFAULT_SCHEDULES: Required<Pick<SchedulerConfig, 'memoryDecay' | 'memoryCleanup' | 'consolidation'>> = {
+const DEFAULT_SCHEDULES: Required<Pick<SchedulerConfig, 'memoryDecay' | 'memoryCleanup' | 'consolidation' | 'proactiveThink'>> = {
   memoryDecay: '0 * * * *',     // Every hour
   memoryCleanup: '0 * * * *',   // Every hour
   consolidation: '0 0 * * *',   // Daily at midnight
+  proactiveThink: '*/15 * * * *', // Every 15 minutes
 };
+
+/** Default proactive think prompt for the agent */
+const PROACTIVE_THINK_PROMPT = `You are running in proactive mode. Take a moment to:
+
+1. **Check your memory** - Review your working memory and system2 for any ongoing tasks, goals, or things you should follow up on.
+
+2. **Observe the environment** - Look at recent file changes, check on any running processes, or examine the project state.
+
+3. **Consider what would be helpful** - Is there anything you should:
+   - Notify the user about? (use the notify tool)
+   - Follow up on from a previous conversation?
+   - Check on proactively (build status, tests, logs)?
+   - Suggest or recommend?
+
+4. **Take action if warranted** - If you have something genuinely useful to communicate or do:
+   - Use the notify tool to reach out to the user
+   - Log important observations to your journal
+   - Store new insights in memory
+
+If nothing needs your attention right now, that's fine - just make a brief journal entry noting you checked in.
+
+Be judicious - only notify the user if you have something genuinely useful to share. Quality over quantity.`;
 
 export class Scheduler extends EventEmitter {
   private agent: Agent;
@@ -128,6 +155,31 @@ export class Scheduler extends EventEmitter {
         }
       },
     });
+
+    // Register proactive thinking task (the agent that messages you first!)
+    const enableProactive = this.config.enableProactive ?? true;
+    if (enableProactive) {
+      this.registerTask({
+        id: 'proactive-think',
+        name: 'Proactive Think',
+        schedule: this.config.proactiveThink ?? DEFAULT_SCHEDULES.proactiveThink,
+        enabled: true,
+        runCount: 0,
+        handler: async () => {
+          try {
+            // Only run if agent is idle
+            if (this.agent.getState() !== 'idle') {
+              return;
+            }
+            // Run the agent with the proactive prompt
+            await this.agent.run(PROACTIVE_THINK_PROMPT);
+          } catch (error) {
+            // Log but don't crash - proactive thinking is best-effort
+            console.error('[Scheduler] Proactive think error:', error);
+          }
+        },
+      });
+    }
 
     // Register custom tasks
     if (this.config.customTasks) {

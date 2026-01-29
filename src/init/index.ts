@@ -411,7 +411,33 @@ Version control operations using Git.
 
   'shell': `# Shell Skill
 
-Command-line operations and shell utilities.
+Command-line operations and shell utilities. As Kronk, you have full shell access - use it powerfully!
+
+## Power Tools (Modern Alternatives)
+
+### Fast File Search
+- \`fd <pattern>\` - Modern find alternative (faster, simpler syntax)
+  - \`fd "\\.ts$"\` - Find TypeScript files
+  - \`fd -t f -e json\` - Find JSON files only
+  - \`fd -H .env\` - Find hidden files like .env
+
+### Interactive Fuzzy Finder (fzf)
+- \`fzf\` - Interactive fuzzy finder for files
+- \`<command> | fzf\` - Fuzzy select from any list
+- \`history | fzf\` - Search command history
+
+### Fast Content Search (ripgrep)
+- \`rg <pattern>\` - Blazingly fast grep alternative
+  - \`rg "TODO"\` - Find TODOs in codebase
+  - \`rg -t ts "async function"\` - Search TypeScript files
+  - \`rg -l "import"\` - List files with matches
+  - \`rg -A 3 -B 3 "function"\` - Show context around matches
+
+### JSON Processing (jq)
+- \`jq '.'\` - Pretty print JSON
+- \`jq '.key'\` - Extract field
+- \`jq '.[] | select(.status == "active")'\` - Filter
+- \`curl api | jq '.data'\` - Process API response
 
 ## File Operations
 - \`ls -la\` - List files with details
@@ -425,6 +451,7 @@ Command-line operations and shell utilities.
 - \`cat <file>\` - Display file contents
 - \`head -n <N> <file>\` - Show first N lines
 - \`tail -n <N> <file>\` - Show last N lines
+- \`tail -f <file>\` - Follow file updates (logs)
 
 ## Text Processing
 - \`grep <pattern> <file>\` - Search for pattern
@@ -444,20 +471,24 @@ Command-line operations and shell utilities.
 ## System Information
 - \`df -h\` - Disk usage
 - \`du -sh <dir>\` - Directory size
-- \`free -h\` - Memory usage
+- \`free -h\` - Memory usage (Linux)
+- \`vm_stat\` - Memory info (macOS)
 - \`uname -a\` - System info
 
 ## Networking
 - \`curl <url>\` - HTTP request
+- \`curl -s <url> | jq\` - Silent + JSON parse
 - \`wget <url>\` - Download file
 - \`ping <host>\` - Test connectivity
-- \`netstat -tulpn\` - Show open ports
+- \`lsof -i :<port>\` - What's using a port
 
 ## Best Practices
 - Use absolute paths when possible
 - Quote paths with spaces
 - Be cautious with rm -rf
 - Use && to chain dependent commands
+- Prefer fd over find, rg over grep when available
+- Use jq for any JSON manipulation
 `,
 
   'file-management': `# File Management Skill

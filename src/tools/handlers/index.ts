@@ -46,3 +46,10 @@ export {
   createJournalHandler,
   type JournalResult,
 } from './journal.js';
+
+export {
+  notifyToolSchema,
+  createNotifyHandler,
+  type NotifyResult,
+  type NotifyEvent,
+} from './notify.js';

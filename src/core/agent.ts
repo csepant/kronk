@@ -27,6 +27,9 @@ import {
   createReadSkillHandler,
   journalToolSchema,
   createJournalHandler,
+  notifyToolSchema,
+  createNotifyHandler,
+  type NotifyEvent,
 } from '../tools/handlers/index.js';
 
 /** Shell confirmation event data */
@@ -50,6 +53,7 @@ export interface AgentEvents {
   'thinking:start': () => void;
   'thinking:chunk': (chunk: string, accumulated: string) => void;
   'thinking:complete': (fullThought: string, tokensUsed: number) => void;
+  'notify': (event: NotifyEvent) => void;
   'error': (error: Error) => void;
 }
 
@@ -304,6 +308,20 @@ export class Agent extends EventEmitter {
     this.instance.tools.registerHandler(
       'journal',
       createJournalHandler(this.instance.journal)
+    );
+
+    // Register notify tool
+    await this.instance.tools.register({
+      name: 'notify',
+      description: 'Send a notification to the user. Use this to proactively communicate important updates, completed tasks, discovered issues, or when you need user attention. Supports desktop notifications and terminal output.',
+      schema: notifyToolSchema,
+      handler: 'core:notify',
+      priority: 10,
+      metadata: { category: 'communication' },
+    });
+    this.instance.tools.registerHandler(
+      'notify',
+      createNotifyHandler(this)
     );
   }
 
