@@ -101,6 +101,10 @@ export { IPCClient, connectToDaemon, isDaemonRunning } from './daemon/client.js'
 export type { IPCServerConfig, IPCServerEvents, JsonRpcRequest, JsonRpcResponse } from './daemon/ipc.js';
 export type { IPCClientConfig, IPCClientEvents } from './daemon/client.js';
 
+// WebSocket Server
+export { WSServer } from './ws/server.js';
+export type { WSServerConfig, WSConnectionData, WSServerEvents } from './ws/server.js';
+
 // File Watcher
 export { FileWatcher } from './watchers/file.js';
 export type {

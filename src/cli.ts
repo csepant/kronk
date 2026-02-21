@@ -274,6 +274,9 @@ program
   .description('Start the Kronk daemon in the background')
   .option('--provider <provider>', 'LLM provider (ollama, openai, anthropic)')
   .option('--model <model>', 'Model to use')
+  .option('--ws-port <port>', 'Enable WebSocket server on specified port')
+  .option('--ws-host <host>', 'WebSocket hostname (default: localhost)')
+  .option('--ws-origins <origins>', 'Comma-separated allowed CORS origins')
   .action(async (options) => {
     try {
       const kronkPath = getKronkPath();
@@ -305,8 +308,20 @@ program
         console.log('Vector search disabled (using text search)');
       }
 
+      // Build WebSocket config if --ws-port is provided
+      const websocket = options.wsPort
+        ? {
+            port: parseInt(options.wsPort, 10),
+            hostname: options.wsHost,
+            allowedOrigins: options.wsOrigins
+              ? (options.wsOrigins as string).split(',').map((o: string) => o.trim())
+              : undefined,
+          }
+        : undefined;
+
       const daemon = new Daemon({
         kronkPath,
+        websocket,
       });
 
       await daemon.start({
@@ -316,6 +331,9 @@ program
 
       console.log(`✓ Daemon started (PID: ${process.pid})`);
       console.log(`Socket: ${daemon.getSocketPath()}`);
+      if (websocket) {
+        console.log(`WebSocket: ws://${websocket.hostname ?? 'localhost'}:${websocket.port}`);
+      }
       console.log('\nPress Ctrl+C to stop');
 
       // Keep running

@@ -15,6 +15,7 @@ import { Agent, type AgentOptions } from '../core/agent.js';
 import { Scheduler, type SchedulerConfig } from '../core/scheduler.js';
 import { QueueManager, type QueueManagerConfig } from '../queue/manager.js';
 import { load, type KronkInstance } from '../init/index.js';
+import { WSServer, type WSServerConfig } from '../ws/server.js';
 
 export interface DaemonConfig {
   /** Path to the .kronk directory */
@@ -33,6 +34,8 @@ export interface DaemonConfig {
   scheduler?: SchedulerConfig;
   /** Queue configuration */
   queue?: QueueManagerConfig;
+  /** WebSocket server configuration */
+  websocket?: WSServerConfig;
 }
 
 export interface DaemonStatus {
@@ -61,6 +64,7 @@ export class Daemon extends EventEmitter {
   private scheduler: Scheduler | null = null;
   private queue: QueueManager | null = null;
   private ipcServer: IPCServer | null = null;
+  private wsServer: WSServer | null = null;
   private startTime: number = 0;
   private running: boolean = false;
 
@@ -119,6 +123,15 @@ export class Daemon extends EventEmitter {
 
     await this.ipcServer.start();
 
+    // Start WebSocket server if configured
+    if (this.config.websocket) {
+      this.wsServer = new WSServer(this.config.websocket);
+      this.wsServer.setAgent(this.agent);
+      this.wsServer.setQueueManager(this.queue);
+      this.wsServer.setScheduler(this.scheduler);
+      await this.wsServer.start();
+    }
+
     // Start scheduler and queue
     this.scheduler.start();
     this.queue.start();
@@ -147,6 +160,11 @@ export class Daemon extends EventEmitter {
     // Stop scheduler and queue
     this.scheduler?.stop();
     this.queue?.stop();
+
+    // Stop WebSocket server
+    if (this.wsServer) {
+      await this.wsServer.stop();
+    }
 
     // Stop IPC server
     if (this.ipcServer) {
@@ -212,6 +230,13 @@ export class Daemon extends EventEmitter {
    */
   getQueueManager(): QueueManager | null {
     return this.queue;
+  }
+
+  /**
+   * Get the WebSocket server instance
+   */
+  getWSServer(): WSServer | null {
+    return this.wsServer;
   }
 
   /**
