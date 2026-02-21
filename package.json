@@ -8,12 +8,19 @@
   "bin": {
     "kronk": "./dist/cli.js"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "install.sh"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "bun test",
     "lint": "eslint src/",
-    "kronk": "bun run src/cli.ts"
+    "kronk": "bun run src/cli.ts",
+    "prepublishOnly": "bun run build"
   },
   "keywords": [
     "ai",
@@ -30,6 +37,7 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
+    "@inquirer/prompts": "^8.2.1",
     "@libsql/client": "^0.14.0",
     "chokidar": "^3.6.0",
     "commander": "^12.1.0",

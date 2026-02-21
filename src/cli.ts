@@ -8,7 +8,7 @@
 import { Command } from 'commander';
 import { render } from 'ink';
 import React from 'react';
-import { init, load, getStatus, updateConfig, loadConstitution, getKronkPath } from './init/index.js';
+import { init, load, getStatus, updateConfig, loadConstitution, getKronkPath, isInitialized } from './init/index.js';
 import { MEMORY_TIERS } from './db/schema.js';
 import { Agent, type LLMProvider } from './core/agent.js';
 import { OpenAIEmbedder, OllamaEmbedder } from './core/embedders.js';
@@ -120,48 +120,69 @@ const program = new Command();
 program
   .name('kronk')
   .description('Agentic AI framework with tiered memory and vector search')
-  .version('0.2.0');
+  .version('0.1.0');
 
 // Initialize command
 program
   .command('init')
   .description('Initialize a new Kronk agent in the current directory')
-  .option('-n, --name <name>', 'Agent name', 'kronk-agent')
-  .option('-m, --model <model>', 'LLM model to use', 'llama3.2')
-  .option('-p, --provider <provider>', 'LLM provider (ollama, openai, anthropic)', 'ollama')
+  .option('-n, --name <name>', 'Agent name')
+  .option('-m, --model <model>', 'LLM model to use')
+  .option('-p, --provider <provider>', 'LLM provider (ollama, openai, anthropic)')
   .option('-f, --force', 'Overwrite existing installation')
   .option('--vector-search', 'Enable vector search with embeddings (requires embedding model)')
+  .option('--no-interactive', 'Disable interactive wizard')
   .action(async (options) => {
     try {
-      // Set default model based on provider
-      let model = options.model;
-      if (options.model === 'llama3.2') {
-        // User didn't specify, use provider default
-        switch (options.provider) {
-          case 'openai':
-            model = 'gpt-4o';
-            break;
-          case 'anthropic':
-            model = 'claude-sonnet-4-20250514';
-            break;
-          default:
-            model = 'llama3.2';
-        }
+      // Determine if user passed any config flags
+      const hasFlags = options.name || options.model || options.provider || options.force || options.vectorSearch;
+      const isTTY = process.stdin.isTTY && process.stdout.isTTY;
+      const interactiveDisabled = options.interactive === false; // --no-interactive sets this to false
+
+      // Interactive wizard: no flags provided, TTY available, not disabled
+      if (!hasFlags && isTTY && !interactiveDisabled) {
+        const existingInstall = await isInitialized();
+        const { runInitWizard } = await import('./init/wizard.js');
+        const result = await runInitWizard(existingInstall);
+
+        await init(undefined, {
+          config: {
+            name: result.name,
+            model: result.model,
+            provider: result.provider,
+            useVectorSearch: result.useVectorSearch,
+          },
+          force: result.force,
+        });
+
+        console.log(`\nProvider: ${result.provider}`);
+        console.log(`Model: ${result.model}`);
+        console.log(`Vector Search: ${result.useVectorSearch ? 'enabled' : 'disabled (text search only)'}`);
+        return;
       }
 
+      // Non-interactive path: apply defaults
+      const provider = options.provider ?? 'ollama';
+      const providerModelDefaults: Record<string, string> = {
+        ollama: 'llama3.2',
+        openai: 'gpt-4o',
+        anthropic: 'claude-sonnet-4-20250514',
+      };
+      const model = options.model ?? providerModelDefaults[provider] ?? 'llama3.2';
+      const name = options.name ?? 'kronk-agent';
       const useVectorSearch = options.vectorSearch ?? false;
 
       await init(undefined, {
         config: {
-          name: options.name,
+          name,
           model,
-          provider: options.provider,
+          provider,
           useVectorSearch,
         },
         force: options.force,
       });
 
-      console.log(`\nProvider: ${options.provider}`);
+      console.log(`\nProvider: ${provider}`);
       console.log(`Model: ${model}`);
       console.log(`Vector Search: ${useVectorSearch ? 'enabled' : 'disabled (text search only)'}`);
 
@@ -169,14 +190,14 @@ program
         console.log('\nNote: Vector search requires an embedding model.');
       }
 
-      if (options.provider === 'ollama') {
+      if (provider === 'ollama') {
         console.log('\nTo use Ollama, make sure it is running:');
         console.log('  ollama serve');
         console.log(`  ollama pull ${model}`);
-      } else if (options.provider === 'openai') {
+      } else if (provider === 'openai') {
         console.log('\nSet your OpenAI API key:');
         console.log('  export OPENAI_API_KEY=your-key');
-      } else if (options.provider === 'anthropic') {
+      } else if (provider === 'anthropic') {
         console.log('\nSet your Anthropic API key:');
         console.log('  export ANTHROPIC_API_KEY=your-key');
       }
