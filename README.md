@@ -1,27 +1,28 @@
-# 🦾 Kronk
+# Kronk
 
 ![Kronk Logo](./Kronk_.webp)
 
-**An agentic AI framework with tiered memory architecture and vector search**
+**An agentic AI framework with tiered memory, tool integration, and autonomous task processing**
 
-Kronk provides a foundation for building autonomous AI agents with persistent memory, tool integration, and self-reflection capabilities. Built on TursoDB (libSQL) with native vector search support.
+Kronk provides a foundation for building autonomous AI agents with persistent memory, self-reflection, background task processing, and a rich interactive TUI. Built on TursoDB (libSQL) with optional vector search support.
 
 ## Features
 
-- **Tiered Memory System**: Three cognitive layers inspired by dual-process theory
-  - **System 2 (Long Horizon)**: Strategic memory for goals, principles, and learned patterns
-  - **Working Memory**: Current task context and active focus
-  - **System 1 (Short Term)**: Reactive memory for recent interactions
-  
-- **Vector Search**: Semantic retrieval across memory and journal using TursoDB's native vector support
-
-- **Tool Framework**: Register, discover, and invoke tools with JSON Schema validation
-
-- **Journal & Reflection**: Chronological logging of thoughts, actions, and observations with self-reflection capabilities
-
-- **Local-First**: Agent state persists in a `.kronk/` folder with SQLite, optionally syncing to Turso cloud
+- **Tiered Memory System** -- Three cognitive layers (System 2 / Working / System 1) with automatic decay, summarization, and optional vector search
+- **Tool Framework** -- Register, discover, and invoke tools with JSON Schema validation; create tools dynamically at runtime (shell, HTTP, JavaScript handlers)
+- **Journal & Reflection** -- Chronological logging of thoughts, actions, observations, and decisions with self-reflection
+- **Daemon with IPC** -- Background daemon process with JSON-RPC 2.0 over Unix sockets
+- **WebSocket Server** -- Browser/remote client interface sharing the same JSON-RPC protocol
+- **Interactive TUI** -- React/Ink dashboard with chat, memory, journal, and task views
+- **Task Queue** -- Priority-based background task processing with retry and exponential backoff
+- **Cron Scheduler** -- Automatic memory decay, cleanup, consolidation, and proactive thinking
+- **File Watchers** -- Chokidar-based directory monitoring that triggers runs, memory stores, or queue tasks
+- **Multi-Provider LLM** -- Ollama, OpenAI, and Anthropic out of the box
+- **Skills System** -- Markdown skill documents loaded from `.kronk/skills/`
+- **Local-First** -- All state persists in a `.kronk/` folder with SQLite; optional Turso cloud sync
 
 ## Screenshots
+
 ![Kronk CLI Screenshot](./assets/screenshot-main.png)
 ![Kronk Chat Screenshot](./assets/screenshot-chat.png)
 
@@ -40,41 +41,44 @@ bun add kronk
 ### Initialize an Agent
 
 ```bash
-# Create a new agent in the current directory
+# Default (Ollama)
 kronk init --name "my-agent"
+
+# With a specific provider
+kronk init --name "my-agent" --provider anthropic --model claude-sonnet-4-20250514
+
+# Enable vector search (requires an embedding model)
+kronk init --name "my-agent" --provider openai --vector-search
 ```
 
-This creates a `.kronk/` folder with:
+This creates a `.kronk/` folder:
+
 ```
 .kronk/
-├── kronk.db          # TursoDB database
-├── constitution.md   # Agent principles and guidelines
-└── config.json       # Runtime configuration
+├── kronk.db          # TursoDB/libSQL database
+├── config.json       # Runtime configuration
+├── constitution.md   # Agent identity and principles
+├── skills/           # Skill docs (git.md, shell.md, etc.)
+├── kronk.sock        # Unix socket for daemon IPC (runtime)
+└── kronk.pid         # Daemon PID file (runtime)
 ```
 
 ### Programmatic Usage
 
 ```typescript
-import { init, load, Agent, OpenAIEmbedder } from 'kronk';
+import { init, load, Agent, OllamaLLM } from 'kronk';
 
-// Initialize a new agent
+// Initialize a new agent (or use load() for an existing one)
 const instance = await init(undefined, {
-  config: { name: 'my-agent' }
+  config: { name: 'my-agent', provider: 'ollama' }
 });
 
-// Or load an existing one
-const instance = await load();
+// Create LLM and (optionally) an embedder
+const llm = new OllamaLLM({ model: 'llama3.2' });
 
-// Create an embedding provider
-const embedder = new OpenAIEmbedder({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
-
-// Create the agent with your LLM provider
-const agent = new Agent(instance, {
-  llm: myLLMProvider, // Implement LLMProvider interface
-  embedder,
-});
+// Create and initialize the agent
+const agent = new Agent(instance, { llm });
+await agent.initialize();
 
 // Run the agent
 const result = await agent.run('Help me plan a software project');
@@ -87,9 +91,11 @@ console.log(result.response);
 
 | Tier | Purpose | Max Tokens | Decay Rate |
 |------|---------|------------|------------|
-| `system2` | Strategic, long-term knowledge | 4,000 | 0.01 (slow) |
-| `working` | Current tasks and active context | 8,000 | 0.1 (moderate) |
-| `system1` | Recent interactions and immediate context | 4,000 | 0.5 (fast) |
+| `system2` | Strategic, long-term knowledge | 30,000 | 0.01 (slow) |
+| `working` | Current tasks and active context | 100,000 | 0.1 (moderate) |
+| `system1` | Recent interactions and immediate context | 20,000 | 0.5 (fast) |
+
+Tiers auto-summarize when they reach 80-90% capacity using an LLM-powered summarizer. Vector search is optional and controlled by the `useVectorSearch` config flag; when disabled, Kronk falls back to text-based search.
 
 ### Working with Memory
 
@@ -103,7 +109,7 @@ await instance.memory.store({
   tags: ['preference', 'language'],
 });
 
-// Semantic search
+// Semantic search (vector) or text search (fallback)
 const results = await instance.memory.search('programming language preferences', {
   limit: 5,
   minSimilarity: 0.6,
@@ -113,10 +119,10 @@ const results = await instance.memory.search('programming language preferences',
 const context = await instance.memory.buildContextWindow();
 const prompt = instance.memory.formatContextForPrompt(context);
 
-// Promote important memories
-await instance.memory.promote(memoryId); // system1 → working → system2
+// Promote important memories between tiers
+await instance.memory.promote(memoryId); // system1 -> working -> system2
 
-// Apply decay and cleanup
+// Maintenance (also handled automatically by the scheduler)
 await instance.memory.applyDecay();
 await instance.memory.cleanup();
 ```
@@ -150,6 +156,8 @@ instance.tools.registerHandler('web_search', async (params) => {
 const result = await instance.tools.invoke('web_search', { query: 'TursoDB' });
 ```
 
+The agent also registers 8 built-in tools on `initialize()`: `shell`, `create_task`, `create_tool`, `discover_tools`, `discover_skills`, `read_skill`, `journal`, and `notify`.
+
 ## Journal
 
 ```typescript
@@ -173,104 +181,138 @@ await instance.journal.milestone('MVP API completed');
 // Search journal
 const entries = await instance.journal.search('API design decisions');
 
-// Generate narrative
-const narrative = await instance.journal.formatAsNarrative(20);
-
 // End session
 await instance.journal.endSession('completed');
 ```
 
 ## CLI Commands
 
+### Core
+
 ```bash
-# Initialize agent
-kronk init --name my-agent --model claude-sonnet-4-20250514
+kronk init --name my-agent --provider anthropic --model claude-sonnet-4-20250514
+kronk init --vector-search          # Enable vector search
+kronk status                        # Agent status and stats
+kronk status --live                 # Live updating (requires daemon)
+```
 
-# View status
-kronk status
+### Daemon
 
-# Memory operations
+```bash
+kronk start                         # Start background daemon
+kronk start --ws-port 3000          # With WebSocket server
+kronk start --ws-port 3000 --ws-host 0.0.0.0 --ws-origins "http://localhost:5173"
+kronk stop                          # Stop the daemon
+kronk restart                       # Restart the daemon
+```
+
+### Interactive
+
+```bash
+kronk ui                            # Launch TUI dashboard
+kronk ui --allow-shell              # Auto-approve shell commands
+kronk chat                          # Simple REPL chat mode
+kronk chat --provider openai        # Override provider for session
+```
+
+### Data
+
+```bash
 kronk memory list --tier working --limit 10
 kronk memory add "Important fact" --tier system2 --importance 0.9
 kronk memory stats
 
-# Journal operations
 kronk journal list --type decision --limit 20
+kronk logs                          # Stream journal entries
+kronk logs --follow                 # Follow new entries (requires daemon)
 
-# Tool management
 kronk tools list
-
-# View constitution
-kronk constitution
-
-# Configuration
-kronk config
-kronk config --set debug=true
 ```
 
-## Constitution
+### Task Queue
 
-The `constitution.md` file defines your agent's identity and guidelines:
-
-```markdown
-# Agent Constitution
-
-## Core Principles
-1. Honesty & Transparency
-2. Helpfulness
-3. Safety & Boundaries
-4. Continuous Learning
-
-## Memory Guidelines
-- System 2: Store core goals and learned patterns
-- Working: Store current task context
-- System 1: Store recent interactions
-
-## Tool Usage
-- Verify availability before invocation
-- Log all tool calls with rationale
-- Handle failures gracefully
+```bash
+kronk queue list --status pending
+kronk queue add <type> --priority 5 --data '{"key":"value"}'
+kronk queue cancel <id>
 ```
 
-## Database Schema
+### File Watchers
 
-```sql
--- Memory with vector embeddings
-CREATE TABLE memory (
-    id TEXT PRIMARY KEY,
-    tier TEXT CHECK(tier IN ('system2', 'working', 'system1')),
-    content TEXT NOT NULL,
-    embedding F32_BLOB(1536),
-    importance REAL DEFAULT 0.5,
-    decay_rate REAL DEFAULT 0.1,
-    -- ...
-);
-
--- Journal entries
-CREATE TABLE journal (
-    id TEXT PRIMARY KEY,
-    entry_type TEXT CHECK(entry_type IN ('thought', 'action', 'observation', ...)),
-    content TEXT NOT NULL,
-    embedding F32_BLOB(1536),
-    session_id TEXT,
-    -- ...
-);
-
--- Tools
-CREATE TABLE tools (
-    id TEXT PRIMARY KEY,
-    name TEXT UNIQUE,
-    description TEXT,
-    schema TEXT, -- JSON Schema
-    handler TEXT,
-    enabled INTEGER DEFAULT 1,
-    -- ...
-);
+```bash
+kronk watch add "src/**/*.ts" --action memory --debounce 500
+kronk watch list
+kronk watch remove <id>
 ```
+
+### Configuration
+
+```bash
+kronk constitution                  # View agent constitution
+kronk config                        # View current config
+kronk config --set debug=true       # Update a config value
+```
+
+## Daemon & WebSocket
+
+Kronk runs as a background daemon with JSON-RPC 2.0 IPC over Unix sockets:
+
+```bash
+kronk start
+```
+
+The daemon integrates the Agent, Scheduler, QueueManager, IPC server, and optional WebSocket server into a single long-running process.
+
+### WebSocket Interface
+
+Enable a WebSocket server for browser or remote clients:
+
+```bash
+kronk start --ws-port 3000 --ws-origins "http://localhost:5173"
+```
+
+The WebSocket server uses the same JSON-RPC 2.0 protocol as Unix socket IPC, plus additional methods:
+
+- `shell.confirm.respond` -- Interactive shell approval from remote clients
+- `agent.thinking.start` / `agent.thinking.chunk` / `agent.thinking.complete` -- Streaming thinking events
+
+Origin validation is controlled via the `--ws-origins` flag.
+
+## LLM Providers
+
+Configure via environment variables or CLI flags:
+
+### Ollama (default)
+
+```bash
+export OLLAMA_HOST=http://localhost:11434
+export OLLAMA_MODEL=llama3.2
+kronk init --provider ollama
+```
+
+### OpenAI
+
+```bash
+export OPENAI_API_KEY=sk-...
+kronk init --provider openai --model gpt-4o
+```
+
+### Anthropic
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+kronk init --provider anthropic --model claude-sonnet-4-20250514
+```
+
+Provider priority: `LLM_PROVIDER` env var > config file > auto-detect.
 
 ## Embedding Providers
 
+Embeddings are optional. Enable with `--vector-search` during init. Supported providers:
+
 ```typescript
+import { OpenAIEmbedder, VoyageEmbedder, OllamaEmbedder, MockEmbedder } from 'kronk';
+
 // OpenAI
 const embedder = new OpenAIEmbedder({
   apiKey: process.env.OPENAI_API_KEY,
@@ -288,52 +330,51 @@ const embedder = new OllamaEmbedder({
   model: 'nomic-embed-text',
   baseUrl: 'http://localhost:11434',
 });
-
-// Mock (for testing)
-const embedder = new MockEmbedder();
 ```
 
-## Cloud Sync with Turso
+## Environment Variables
 
-```typescript
-import { createEmbeddedReplicaDb } from 'kronk';
-
-// Local SQLite with sync to Turso cloud
-const db = createEmbeddedReplicaDb(
-  './kronk.db',
-  'libsql://your-db.turso.io',
-  'your-auth-token',
-  60 // sync interval in seconds
-);
-```
+| Variable | Description |
+|----------|-------------|
+| `LLM_PROVIDER` | `ollama`, `openai`, or `anthropic` |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `OPENAI_API_KEY` | OpenAI API key |
+| `OLLAMA_HOST` | Ollama server URL (default: `http://localhost:11434`) |
+| `OLLAMA_MODEL` | Ollama LLM model (default: `llama3.2`) |
+| `OLLAMA_EMBED_MODEL` | Ollama embedding model (default: `nomic-embed-text`) |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         Agent                                │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │                    LLM Provider                          │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│                            │                                  │
-│  ┌─────────────┬───────────┼───────────┬──────────────────┐  │
-│  │             │           │           │                  │  │
-│  ▼             ▼           ▼           ▼                  │  │
-│ ┌───────┐  ┌────────┐  ┌────────┐  ┌─────────┐           │  │
-│ │Memory │  │ Tools  │  │Journal │  │Embedder │           │  │
-│ │Manager│  │Manager │  │Manager │  │         │           │  │
-│ └───┬───┘  └────┬───┘  └───┬────┘  └────┬────┘           │  │
-│     │           │          │            │                 │  │
-│     └───────────┴──────────┴────────────┘                 │  │
-│                            │                               │  │
-│  ┌─────────────────────────┴─────────────────────────────┐ │
-│  │                   TursoDB (libSQL)                     │ │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐   │ │
-│  │  │ Memory  │  │  Tools  │  │ Journal │  │Sessions │   │ │
-│  │  │ (F32)   │  │         │  │  (F32)  │  │         │   │ │
-│  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘   │ │
-│  └───────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                           Daemon                                 │
+│  ┌──────────┐  ┌───────────┐  ┌────────────┐  ┌─────────────┐  │
+│  │IPC Server│  │ WS Server │  │ Scheduler  │  │Queue Manager│  │
+│  └─────┬────┘  └─────┬─────┘  └──────┬─────┘  └──────┬──────┘  │
+│        └──────┬──────┘               │               │          │
+│               ▼                      ▼               ▼          │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │                         Agent                             │   │
+│  │  ┌─────────────────────────────────────────────────────┐  │   │
+│  │  │                    LLM Provider                      │  │   │
+│  │  └─────────────────────────────────────────────────────┘  │   │
+│  │                           │                                │   │
+│  │  ┌────────┐ ┌────────┐ ┌────────┐ ┌─────────┐ ┌────────┐ │   │
+│  │  │Memory  │ │ Tools  │ │Journal │ │Messages │ │Embedder│ │   │
+│  │  │Manager │ │Manager │ │Manager │ │Manager  │ │(opt.)  │ │   │
+│  │  └───┬────┘ └───┬────┘ └───┬────┘ └────┬────┘ └───┬────┘ │   │
+│  │      └──────┬───┴─────┬────┘           │          │      │   │
+│  └─────────────┼─────────┼────────────────┼──────────┘──────┘   │
+│                ▼         ▼                ▼                      │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │                   TursoDB (libSQL)                         │   │
+│  │  memory │ tools │ journal │ sessions │ messages │ queue    │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌─────────────┐                                                │
+│  │File Watcher │                                                │
+│  └─────────────┘                                                │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## License
