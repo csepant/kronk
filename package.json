@@ -1,6 +1,6 @@
 {
   "name": "kronk",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "description": "An agentic AI framework with tiered memory architecture and vector search",
   "type": "module",
   "main": "dist/index.js",
