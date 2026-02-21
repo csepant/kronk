@@ -31,26 +31,42 @@ function truncate(text: string, maxLength: number): string {
   return text.slice(0, maxLength - 3) + '...';
 }
 
-/** Format a value for display */
+/** Format a value for display (pretty-printed, multi-line) */
 function formatValue(value: unknown, maxLength = 100): string {
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
   if (typeof value === 'string') return truncate(value, maxLength);
   try {
     const str = JSON.stringify(value, null, 2);
-    return str;
+    return truncate(str, maxLength);
   } catch {
     return String(value);
   }
 }
 
-/** Format params as a brief summary */
+/** Format a value as a single line (no newlines) for inline previews */
+function formatValueInline(value: unknown, maxLength = 60): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value === 'string') return truncate(value, maxLength);
+  try {
+    const str = JSON.stringify(value);
+    return truncate(str, maxLength);
+  } catch {
+    return truncate(String(value), maxLength);
+  }
+}
+
+/** Format params as a brief single-line summary */
 function formatParamsSummary(params: Record<string, unknown>): string {
   const keys = Object.keys(params);
   if (keys.length === 0) return '';
   if (keys.length === 1) {
     const val = params[keys[0]];
-    if (typeof val === 'string') return truncate(val, 40);
+    if (typeof val === 'string') {
+      const clean = val.replace(/\n/g, ' ').replace(/\s+/g, ' ');
+      return truncate(clean, 40);
+    }
     return truncate(JSON.stringify(val), 40);
   }
   return `${keys.length} params`;
@@ -109,7 +125,7 @@ export function ToolOutput({ toolCall, isExpanded, isSelected }: ToolOutputProps
           <>
             <Text dimColor> → </Text>
             <Text dimColor>
-              {truncate(formatValue(toolCall.result, 60), 60)}
+              {formatValueInline(toolCall.result, 50)}
             </Text>
           </>
         )}
@@ -127,9 +143,11 @@ export function ToolOutput({ toolCall, isExpanded, isSelected }: ToolOutputProps
               <Text color="blue" bold>Parameters:</Text>
               <Box marginLeft={2} flexDirection="column">
                 {Object.entries(toolCall.params).map(([key, value]) => (
-                  <Box key={key}>
+                  <Box key={key} flexDirection="column">
                     <Text color="cyan">{key}: </Text>
-                    <Text wrap="wrap">{formatValue(value, 500)}</Text>
+                    <Box marginLeft={2}>
+                      <Text wrap="wrap">{formatValue(value, 500)}</Text>
+                    </Box>
                   </Box>
                 ))}
               </Box>
@@ -140,7 +158,7 @@ export function ToolOutput({ toolCall, isExpanded, isSelected }: ToolOutputProps
           {toolCall.status === 'complete' && toolCall.result !== undefined && (
             <Box flexDirection="column">
               <Text color="green" bold>Result:</Text>
-              <Box marginLeft={2}>
+              <Box marginLeft={2} flexDirection="column">
                 <Text wrap="wrap">{formatValue(toolCall.result, 2000)}</Text>
               </Box>
             </Box>
@@ -149,7 +167,7 @@ export function ToolOutput({ toolCall, isExpanded, isSelected }: ToolOutputProps
           {toolCall.status === 'error' && toolCall.error && (
             <Box flexDirection="column">
               <Text color="red" bold>Error:</Text>
-              <Box marginLeft={2}>
+              <Box marginLeft={2} flexDirection="column">
                 <Text color="red" wrap="wrap">{toolCall.error}</Text>
               </Box>
             </Box>

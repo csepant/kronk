@@ -131,6 +131,9 @@ export type { MemoryProps } from './ui/components/Memory.js';
 export { TaskQueue } from './ui/components/TaskQueue.js';
 export type { TaskQueueProps } from './ui/components/TaskQueue.js';
 
+// Tool handler types
+export type { FormRequestEvent, AskUserResult, FormQuestion } from './tools/handlers/form.js';
+
 // UI Hooks
 export { useAgent } from './ui/hooks/useAgent.js';
-export type { UseAgentState } from './ui/hooks/useAgent.js';
+export type { UseAgentState, PendingForm } from './ui/hooks/useAgent.js';

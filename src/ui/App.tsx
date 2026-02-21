@@ -172,6 +172,8 @@ export function App({ agent, queue, messageManager, allowShell, initialView = 'd
             messageManager={messageManager}
             pendingShellConfirm={agentState.pendingShellConfirm}
             onShellConfirm={agentState.handleShellConfirm}
+            pendingForm={agentState.pendingForm}
+            onFormSubmit={agentState.handleFormSubmit}
           />
         )}
         {view === 'journal' && (

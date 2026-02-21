@@ -31,7 +31,7 @@ FORCE_GUM=""
 NO_PROMPT=false
 
 MIN_NODE_MAJOR=20
-PACKAGE_NAME="kronk"
+PACKAGE_NAME="kronk-ai"
 
 # Colors (ANSI)
 RED='\033[0;31m'

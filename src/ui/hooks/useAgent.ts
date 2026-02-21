@@ -6,6 +6,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { Agent, AgentState, RunResult, ShellConfirmEvent } from '../../core/agent.js';
+import type { FormRequestEvent, FormQuestion } from '../../tools/handlers/form.js';
 import type { JournalEntry } from '../../journal/manager.js';
 import type { QueueManager } from '../../queue/manager.js';
 import type { MemoryStats, QueueStats } from '../components/Dashboard.js';
@@ -15,6 +16,11 @@ export interface PendingShellConfirm {
   command: string;
   cwd: string;
   resolve: (approved: boolean) => void;
+}
+
+export interface PendingForm {
+  questions: FormQuestion[];
+  resolve: (answers: string[]) => void;
 }
 
 export interface UseAgentState {
@@ -30,10 +36,12 @@ export interface UseAgentState {
   lastResult: RunResult | null;
   toolCalls: ToolCall[];
   pendingShellConfirm: PendingShellConfirm | null;
+  pendingForm: PendingForm | null;
   runMessage: (message: string) => Promise<void>;
   refresh: () => Promise<void>;
   clearToolCalls: () => void;
   handleShellConfirm: (approved: boolean) => void;
+  handleFormSubmit: (answers: string[]) => void;
 }
 
 export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
@@ -49,6 +57,7 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
   const [lastResult, setLastResult] = useState<RunResult | null>(null);
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
   const [pendingShellConfirm, setPendingShellConfirm] = useState<PendingShellConfirm | null>(null);
+  const [pendingForm, setPendingForm] = useState<PendingForm | null>(null);
 
   // Generate unique ID for tool calls
   const generateToolId = useCallback(() => {
@@ -67,6 +76,14 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
       setPendingShellConfirm(null);
     }
   }, [pendingShellConfirm]);
+
+  // Handle form dialog submission
+  const handleFormSubmit = useCallback((answers: string[]) => {
+    if (pendingForm) {
+      pendingForm.resolve(answers);
+      setPendingForm(null);
+    }
+  }, [pendingForm]);
 
   // Load initial data
   const loadData = useCallback(async () => {
@@ -186,6 +203,14 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
       });
     };
 
+    // Form request events
+    const handleFormRequest = (event: FormRequestEvent) => {
+      setPendingForm({
+        questions: event.questions,
+        resolve: event.resolve,
+      });
+    };
+
     agent.on('state:change', handleStateChange);
     agent.on('journal:entry', handleJournalEntry);
     agent.on('run:complete', handleRunComplete);
@@ -195,6 +220,7 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
     agent.on('thinking:complete', handleThinkingComplete);
     agent.on('tool:invoke', handleToolInvoke);
     agent.on('shell:confirm', handleShellConfirmEvent);
+    agent.on('form:request', handleFormRequest);
 
     // Queue events
     if (queue) {
@@ -231,6 +257,7 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
       agent.removeListener('thinking:complete', handleThinkingComplete);
       agent.removeListener('tool:invoke', handleToolInvoke);
       agent.removeListener('shell:confirm', handleShellConfirmEvent);
+      agent.removeListener('form:request', handleFormRequest);
       clearInterval(uptimeInterval);
       clearInterval(refreshInterval);
     };
@@ -247,18 +274,12 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
     setToolCalls([]); // Clear tool calls for new message
 
     try {
-      const result = await agent.run(message);
-      setLastResult(result);
-      // Show response or error message
-      if (result.success && result.response) {
-        setLastResponse(result.response);
-      } else if (result.error) {
-        setLastResponse(`Error: ${result.error}`);
-      }
+      // Response handling is done by the 'run:complete' event listener
+      await agent.run(message);
     } catch (error) {
+      // Only handle unexpected errors not caught by the event system
       const err = error instanceof Error ? error.message : String(error);
       setLastResponse(`Error: ${err}`);
-    } finally {
       setIsRunning(false);
     }
   }, [agent, isRunning]);
@@ -276,9 +297,11 @@ export function useAgent(agent: Agent, queue?: QueueManager): UseAgentState {
     lastResult,
     toolCalls,
     pendingShellConfirm,
+    pendingForm,
     runMessage,
     refresh: loadData,
     clearToolCalls,
     handleShellConfirm,
+    handleFormSubmit,
   };
 }

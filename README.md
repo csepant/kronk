@@ -28,12 +28,32 @@ Kronk provides a foundation for building autonomous AI agents with persistent me
 
 ## Installation
 
+### One-Line Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/csepant/kronk/main/install.sh | bash
+```
+
+This will install Node.js (if needed), install kronk-ai globally via npm, and launch the interactive setup wizard.
+
+```bash
+# Options
+bash install.sh --dry-run    # Preview without making changes
+bash install.sh --no-init    # Skip the setup wizard
+bash install.sh --verbose    # Debug output
+```
+
+### Manual Install
+
 ```bash
 # Using npm
-npm install kronk
+npm install -g kronk-ai
 
 # Using bun
-bun add kronk
+bun add -g kronk-ai
+
+# As a project dependency
+npm install kronk-ai
 ```
 
 ## Quick Start
@@ -41,14 +61,17 @@ bun add kronk
 ### Initialize an Agent
 
 ```bash
-# Default (Ollama)
-kronk init --name "my-agent"
+# Interactive wizard (recommended)
+kronk init
 
-# With a specific provider
+# Non-interactive with flags
 kronk init --name "my-agent" --provider anthropic --model claude-sonnet-4-20250514
 
 # Enable vector search (requires an embedding model)
 kronk init --name "my-agent" --provider openai --vector-search
+
+# Disable interactive wizard explicitly
+kronk init --no-interactive
 ```
 
 This creates a `.kronk/` folder:
@@ -66,7 +89,7 @@ This creates a `.kronk/` folder:
 ### Programmatic Usage
 
 ```typescript
-import { init, load, Agent, OllamaLLM } from 'kronk';
+import { init, load, Agent, OllamaLLM } from 'kronk-ai';
 
 // Initialize a new agent (or use load() for an existing one)
 const instance = await init(undefined, {
@@ -311,7 +334,7 @@ Provider priority: `LLM_PROVIDER` env var > config file > auto-detect.
 Embeddings are optional. Enable with `--vector-search` during init. Supported providers:
 
 ```typescript
-import { OpenAIEmbedder, VoyageEmbedder, OllamaEmbedder, MockEmbedder } from 'kronk';
+import { OpenAIEmbedder, VoyageEmbedder, OllamaEmbedder, MockEmbedder } from 'kronk-ai';
 
 // OpenAI
 const embedder = new OpenAIEmbedder({

@@ -235,7 +235,7 @@ function CodeBlock({
           {language}
         </Text>
       )}
-      <Text color="yellow">{content}</Text>
+      <Text color="yellow" wrap="truncate-end">{content}</Text>
     </Box>
   );
 }
@@ -261,7 +261,7 @@ export function Markdown({ children, wrap = true }: MarkdownProps): React.ReactE
           case 'header':
             return (
               <Box key={i} marginY={block.level === 1 ? 1 : 0}>
-                <Text bold color={block.level === 1 ? 'magenta' : block.level === 2 ? 'blue' : 'white'}>
+                <Text bold wrap="wrap" color={block.level === 1 ? 'magenta' : block.level === 2 ? 'blue' : 'white'}>
                   {'#'.repeat(block.level || 1)} {block.content}
                 </Text>
               </Box>
@@ -269,16 +269,17 @@ export function Markdown({ children, wrap = true }: MarkdownProps): React.ReactE
           case 'list':
             return (
               <Box key={i} marginLeft={(block.level || 0) * 2}>
-                <Text>
-                  <Text color="cyan">•</Text> <InlineMarkdown text={block.content} />
-                </Text>
+                <Text color="cyan">• </Text>
+                <InlineMarkdown text={block.content} />
               </Box>
             );
           case 'paragraph':
           default:
             return (
-              <Box key={i}>
-                <InlineMarkdown text={block.content} />
+              <Box key={i} flexDirection="column">
+                {block.content.split('\n').map((line, j) => (
+                  <InlineMarkdown key={j} text={line} />
+                ))}
               </Box>
             );
         }

@@ -12,8 +12,9 @@ import type { Agent, RunResult } from '../../core/agent.js';
 import { ToolOutput, type ToolCall } from './ToolOutput.js';
 import { Markdown } from './Markdown.js';
 import { ShellConfirmDialog } from './ShellConfirmDialog.js';
+import { FormDialog } from './FormDialog.js';
 import type { MessageManager } from '../../messages/manager.js';
-import type { PendingShellConfirm } from '../hooks/useAgent.js';
+import type { PendingShellConfirm, PendingForm } from '../hooks/useAgent.js';
 
 export interface ChatProps {
   agent: Agent;
@@ -28,6 +29,8 @@ export interface ChatProps {
   messageManager?: MessageManager;
   pendingShellConfirm?: PendingShellConfirm | null;
   onShellConfirm?: (approved: boolean) => void;
+  pendingForm?: PendingForm | null;
+  onFormSubmit?: (answers: string[]) => void;
 }
 
 interface ChatMessage {
@@ -51,6 +54,8 @@ export function Chat({
   messageManager,
   pendingShellConfirm,
   onShellConfirm,
+  pendingForm,
+  onFormSubmit,
 }: ChatProps): React.ReactElement {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -228,12 +233,17 @@ export function Chat({
     await onMessage(userMessage);
   };
 
-  const formatTime = (date: Date): string => {
-    return date.toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
+  const formatTime = (date: Date | string | number): string => {
+    try {
+      const d = date instanceof Date ? date : new Date(date);
+      return d.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      });
+    } catch {
+      return '--:--';
+    }
   };
 
   return (
@@ -246,7 +256,7 @@ export function Chat({
             <Text dimColor>Type your message below and press Enter</Text>
           </Box>
         ) : (
-          messages.slice(-10).map((msg, i) => {
+          messages.slice(isRunning ? -5 : -10).map((msg, i) => {
             // Calculate tool index offset for this message
             const msgToolCalls = msg.toolCalls ?? [];
 
@@ -278,7 +288,7 @@ export function Chat({
                   </Box>
                 )}
 
-                <Box marginLeft={2}>
+                <Box marginLeft={2} flexDirection="column">
                   {msg.role === 'assistant' ? (
                     <Markdown>{msg.content}</Markdown>
                   ) : (
@@ -319,8 +329,8 @@ export function Chat({
             {isThinking && currentThought && (
               <Box marginTop={1} marginLeft={2} flexDirection="column">
                 <Text dimColor wrap="wrap">
-                  {currentThought.length > 500
-                    ? currentThought.slice(-500) + '...'
+                  {currentThought.length > 200
+                    ? '...' + currentThought.slice(-200)
                     : currentThought}
                 </Text>
               </Box>
@@ -371,7 +381,7 @@ export function Chat({
                   return (
                     <Box key={i} flexDirection="column" marginTop={1} marginLeft={1}>
                       <Text color="yellow">--- Iteration {i + 1} ---</Text>
-                      <Box marginLeft={1}>
+                      <Box marginLeft={1} flexDirection="column">
                         <Text wrap="wrap" color="gray">{displayJson}</Text>
                       </Box>
                     </Box>
@@ -395,6 +405,16 @@ export function Chat({
             command={pendingShellConfirm.command}
             cwd={pendingShellConfirm.cwd}
             onConfirm={onShellConfirm}
+          />
+        </Box>
+      )}
+
+      {/* Form Dialog */}
+      {pendingForm && onFormSubmit && (
+        <Box marginBottom={1}>
+          <FormDialog
+            questions={pendingForm.questions}
+            onSubmit={onFormSubmit}
           />
         </Box>
       )}

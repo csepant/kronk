@@ -123,6 +123,32 @@ kronk start --ws-port 3000 --ws-host 0.0.0.0 --ws-origins "http://localhost:5173
 
 Uses JSON-RPC 2.0 over WebSocket. Supports all IPC methods plus `shell.confirm.respond` for interactive shell approval and thinking event notifications. Config passed via `DaemonConfig.websocket`.
 
+## npm Package
+
+The package is published to npm as `kronk-ai` (the `kronk` name was taken). The binary is still `kronk`.
+
+```bash
+npm install -g kronk-ai    # Global install
+npm publish                 # Publish (requires npm login + 2FA or granular token)
+npm version patch|minor|major  # Bump version before publishing updates
+```
+
+The `files` field in `package.json` limits the published package to `dist/`, `README.md`, `LICENSE`, and `install.sh`. The `prepublishOnly` script auto-runs `bun run build` before publish.
+
+### Install Script
+
+`install.sh` is a curl-pipeable bash installer with gum TUI, OS detection, Node.js auto-install, and auto-run of `kronk init`:
+
+```bash
+curl -fsSL https://your-domain.com/install.sh | bash
+bash install.sh --dry-run   # Preview what would happen
+bash install.sh --no-init   # Skip interactive wizard
+```
+
+### Interactive Init Wizard
+
+`kronk init` with no flags in a TTY launches an interactive wizard (`src/init/wizard.ts`) using `@inquirer/prompts`. Passing any flag (e.g. `--provider`, `--name`) or `--no-interactive` uses the non-interactive path.
+
 ## Key Patterns
 
 1. **Event-Driven**: All major components extend EventEmitter with typed events

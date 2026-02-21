@@ -30,6 +30,9 @@ import {
   notifyToolSchema,
   createNotifyHandler,
   type NotifyEvent,
+  askUserSchema,
+  createAskUserHandler,
+  type FormRequestEvent,
 } from '../tools/handlers/index.js';
 
 /** Shell confirmation event data */
@@ -54,6 +57,7 @@ export interface AgentEvents {
   'thinking:chunk': (chunk: string, accumulated: string) => void;
   'thinking:complete': (fullThought: string, tokensUsed: number) => void;
   'notify': (event: NotifyEvent) => void;
+  'form:request': (event: FormRequestEvent) => void;
   'error': (error: Error) => void;
 }
 
@@ -322,6 +326,20 @@ export class Agent extends EventEmitter {
     this.instance.tools.registerHandler(
       'notify',
       createNotifyHandler(this)
+    );
+
+    // Register ask_user tool
+    await this.instance.tools.register({
+      name: 'ask_user',
+      description: 'Ask the user structured questions with selectable options. Use when you need clarifying information or a choice between alternatives. Blocks until the user responds.',
+      schema: askUserSchema,
+      handler: 'core:ask_user',
+      priority: 10,
+      metadata: { category: 'communication' },
+    });
+    this.instance.tools.registerHandler(
+      'ask_user',
+      createAskUserHandler(this)
     );
   }
 
