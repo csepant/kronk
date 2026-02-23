@@ -610,17 +610,43 @@ install_kronk() {
   if command -v kronk &>/dev/null; then
     local current
     current="$(kronk --version 2>/dev/null || echo "unknown")"
-    ui_info "Existing Kronk installation found (v$current)"
-    if [[ "$KRONK_VERSION" == "latest" ]]; then
-      ui_info "Upgrading to latest version..."
-    else
-      ui_info "Installing version $KRONK_VERSION..."
+    ui_success "Kronk is already installed (v$current)"
+
+    if $NO_PROMPT || ! is_tty; then
+      ui_info "Skipping update in non-interactive mode."
+      ui_info "To update manually: npm install -g $pkg_spec"
+      return
     fi
+
+    local answer=""
+    if has_gum; then
+      if "$GUM_BIN" confirm "Would you like to update Kronk?"; then
+        answer="y"
+      else
+        answer="n"
+      fi
+    else
+      echo -n -e "${BLUE}Would you like to update Kronk? [y/N]${RESET} "
+      read -r answer
+    fi
+
+    if [[ "$answer" != "y" && "$answer" != "Y" ]]; then
+      ui_info "Keeping current installation."
+      return
+    fi
+
+    ui_info "Updating to ${KRONK_VERSION}..."
   fi
 
   if $DRY_RUN; then
     ui_dry "Would run: npm install -g $pkg_spec"
     return
+  fi
+
+  # Use --force when updating over an existing binary to avoid EEXIST
+  local npm_flags=()
+  if command -v kronk &>/dev/null; then
+    npm_flags+=(--force)
   fi
 
   local max_retries=3
@@ -630,25 +656,11 @@ install_kronk() {
     attempt=$((attempt + 1))
     verbose "Install attempt $attempt of $max_retries"
 
-    if ui_spin "Installing $pkg_spec..." npm install -g "$pkg_spec" 2>&1; then
+    if ui_spin "Installing $pkg_spec..." npm install -g "${npm_flags[@]}" "$pkg_spec" 2>&1; then
       break
     fi
 
-    local exit_code=$?
-
     if [[ $attempt -lt $max_retries ]]; then
-      # Handle EEXIST by cleaning stale directories
-      if npm install -g "$pkg_spec" 2>&1 | grep -q "EEXIST"; then
-        ui_warn "Stale directory detected, cleaning up..."
-        local npm_prefix
-        npm_prefix="$(npm config get prefix)"
-        local stale_dir="$npm_prefix/lib/node_modules/$PACKAGE_NAME"
-        if [[ -d "$stale_dir" ]]; then
-          rm -rf "$stale_dir"
-          verbose "Cleaned $stale_dir"
-        fi
-      fi
-
       local wait_time=$((attempt * 3))
       ui_warn "Install failed (attempt $attempt/$max_retries). Retrying in ${wait_time}s..."
       sleep "$wait_time"
