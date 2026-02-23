@@ -33,6 +33,14 @@ import {
   askUserSchema,
   createAskUserHandler,
   type FormRequestEvent,
+  readFileSchema,
+  createReadFileHandler,
+  writeFileSchema,
+  createWriteFileHandler,
+  listDirectorySchema,
+  createListDirectoryHandler,
+  makeDirectorySchema,
+  createMakeDirectoryHandler,
 } from '../tools/handlers/index.js';
 
 /** Shell confirmation event data */
@@ -206,7 +214,7 @@ export class Agent extends EventEmitter {
    */
   async initialize(): Promise<void> {
     await this.registerCoreTools();
-    const dynamicCount = await loadDynamicTools(this.instance.tools, this);
+    const dynamicCount = await loadDynamicTools(this.instance.tools, this, this.instance.agentfs);
     if (dynamicCount > 0) {
       console.log(`[Kronk] Loaded ${dynamicCount} dynamic tool(s)`);
     }
@@ -227,7 +235,7 @@ export class Agent extends EventEmitter {
     });
     this.instance.tools.registerHandler(
       'shell',
-      createShellHandler(this, this.instance.paths.root)
+      createShellHandler(this, this.instance.paths.root, this.instance.agentfs)
     );
 
     // Register create_task tool
@@ -255,7 +263,7 @@ export class Agent extends EventEmitter {
     });
     this.instance.tools.registerHandler(
       'create_tool',
-      createCreateToolHandler(this.instance.tools, this)
+      createCreateToolHandler(this.instance.tools, this, this.instance.agentfs)
     );
 
     // Register discover_tools tool
@@ -341,6 +349,61 @@ export class Agent extends EventEmitter {
       'ask_user',
       createAskUserHandler(this)
     );
+
+    // Register file tools (conditionally based on AgentFS availability)
+    if (this.instance.agentfs) {
+      await this.instance.tools.register({
+        name: 'read_file',
+        description: 'Read a file through the sandbox overlay. Files are loaded from the real filesystem on first access.',
+        schema: readFileSchema,
+        handler: 'core:read_file',
+        priority: 10,
+        metadata: { category: 'filesystem' },
+      });
+      this.instance.tools.registerHandler(
+        'read_file',
+        createReadFileHandler(this.instance.agentfs, this.instance.paths.root)
+      );
+
+      await this.instance.tools.register({
+        name: 'write_file',
+        description: 'Write content to a file in the sandbox. Changes go to the copy-on-write delta layer and do NOT modify real files.',
+        schema: writeFileSchema,
+        handler: 'core:write_file',
+        priority: 10,
+        metadata: { category: 'filesystem' },
+      });
+      this.instance.tools.registerHandler(
+        'write_file',
+        createWriteFileHandler(this.instance.agentfs, this.instance.paths.root)
+      );
+
+      await this.instance.tools.register({
+        name: 'list_directory',
+        description: 'List the contents of a directory. Shows a merged view of real filesystem and sandbox changes.',
+        schema: listDirectorySchema,
+        handler: 'core:list_directory',
+        priority: 10,
+        metadata: { category: 'filesystem' },
+      });
+      this.instance.tools.registerHandler(
+        'list_directory',
+        createListDirectoryHandler(this.instance.agentfs, this.instance.paths.root)
+      );
+
+      await this.instance.tools.register({
+        name: 'make_directory',
+        description: 'Create a directory in the sandbox.',
+        schema: makeDirectorySchema,
+        handler: 'core:make_directory',
+        priority: 10,
+        metadata: { category: 'filesystem' },
+      });
+      this.instance.tools.registerHandler(
+        'make_directory',
+        createMakeDirectoryHandler(this.instance.agentfs, this.instance.paths.root)
+      );
+    }
   }
 
   /**
@@ -796,6 +859,16 @@ Be concise and actionable.`,
     const memoryContext = this.instance.memory.formatContextForPrompt(context);
     const toolPrompt = await this.instance.tools.generateToolPrompt();
 
+    // Build AgentFS section if enabled
+    const agentfsSection = this.instance.agentfs?.isEnabled()
+      ? `## Filesystem Sandbox
+You are operating inside an AgentFS sandbox. File writes go to a copy-on-write
+delta layer and do NOT modify the user's actual files. Use read_file, write_file,
+list_directory, and make_directory tools for file operations. The user will review
+and commit your changes at the end of the session.
+`
+      : '';
+
     return `# Agent: ${this.instance.config.name}
 
 ## Constitution
@@ -807,7 +880,7 @@ ${memoryContext}
 ## Available Tools
 ${toolPrompt}
 
-## Instructions
+${agentfsSection}## Instructions
 - Use your memory to maintain context across interactions
 - Use the journal tool sparingly for information worth remembering:
   - Decisions: Record important choices and their rationale
@@ -825,8 +898,20 @@ ${this.systemPromptAdditions}`;
   /**
    * Cleanup and close connections
    */
+  /**
+   * Get pending AgentFS changes (if any)
+   */
+  getPendingChanges(): { count: number; changes: Array<{ path: string; type: string; size: number }> } | null {
+    if (!this.instance.agentfs?.isEnabled()) return null;
+    const changes = this.instance.agentfs.listChanges();
+    return { count: changes.length, changes };
+  }
+
   async shutdown(): Promise<void> {
     await this.instance.journal.endSession();
+    if (this.instance.agentfs) {
+      await this.instance.agentfs.shutdown();
+    }
     await this.instance.db.close();
   }
 }

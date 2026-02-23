@@ -16,6 +16,7 @@ import { MemoryManager } from '../memory/manager.js';
 import { ToolsManager } from '../tools/manager.js';
 import { JournalManager } from '../journal/manager.js';
 import { MessageManager } from '../messages/manager.js';
+import { AgentFSManager } from '../agentfs/manager.js';
 
 export interface KronkConfig {
   /** Name of this agent instance */
@@ -76,6 +77,15 @@ export interface KronkConfig {
     /** Number of journal lines to show */
     journalLines?: number;
   };
+  /** AgentFS filesystem sandboxing configuration */
+  agentfs?: {
+    /** Enable filesystem sandboxing (default: true) */
+    enabled?: boolean;
+    /** Base path for the overlay (default: cwd) */
+    basePath?: string;
+    /** Auto-commit changes on shutdown (default: false) */
+    autoCommit?: boolean;
+  };
 }
 
 export const DEFAULT_CONFIG: KronkConfig = {
@@ -83,6 +93,7 @@ export const DEFAULT_CONFIG: KronkConfig = {
   model: 'claude-sonnet-4-20250514',
   useVectorSearch: false,
   debug: false,
+  agentfs: { enabled: true },
 };
 
 export interface KronkInstance {
@@ -92,12 +103,14 @@ export interface KronkInstance {
   tools: ToolsManager;
   journal: JournalManager;
   messages: MessageManager;
+  agentfs: AgentFSManager | null;
   paths: {
     root: string;
     db: string;
     constitution: string;
     config: string;
     skills: string;
+    agentfs: string;
   };
 }
 
@@ -140,12 +153,14 @@ export async function init(
   } = {}
 ): Promise<KronkInstance> {
   const kronkPath = getKronkPath(basePath);
+  const agentfsDir = join(kronkPath, 'agentfs');
   const paths = {
     root: kronkPath,
     db: join(kronkPath, 'kronk.db'),
     constitution: join(kronkPath, 'constitution.md'),
     config: join(kronkPath, 'config.json'),
     skills: join(kronkPath, 'skills'),
+    agentfs: agentfsDir,
   };
 
   // Check if already initialized
@@ -157,8 +172,9 @@ export async function init(
     console.log(`[Kronk] Reinitializing (force mode)...`);
   }
 
-  // Create .kronk directory
+  // Create .kronk directory and subdirectories
   await mkdir(kronkPath, { recursive: true });
+  await mkdir(agentfsDir, { recursive: true });
   console.log(`[Kronk] Created directory: ${kronkPath}`);
 
   // Write constitution
@@ -215,6 +231,37 @@ how to accomplish tasks in specific domains (e.g., git operations, file manageme
     tags: ['capability', 'meta', 'tools', 'skills'],
   });
 
+  // Initialize AgentFS if enabled
+  const agentfsEnabled = config.agentfs?.enabled !== false;
+  let agentfs: AgentFSManager | null = null;
+
+  if (agentfsEnabled) {
+    const agentfsDbPath = join(agentfsDir, `${config.name}.db`);
+    agentfs = new AgentFSManager({
+      enabled: true,
+      agentId: config.name,
+      dbPath: agentfsDbPath,
+      basePath: resolve(basePath ?? process.cwd()),
+      autoCommit: config.agentfs?.autoCommit,
+    });
+    await agentfs.initialize();
+    console.log(`[Kronk] AgentFS sandbox: enabled`);
+
+    // Seed AgentFS awareness memory
+    await memory.store({
+      tier: 'system2',
+      content: `I operate inside a filesystem sandbox (AgentFS). File writes go to a
+copy-on-write delta layer and do NOT modify the user's actual files. I should use
+the read_file, write_file, list_directory, and make_directory tools for file
+operations. The user will review and commit my changes at the end of the session.
+I should inform the user about pending changes when relevant.`,
+      summary: 'AgentFS filesystem sandbox awareness',
+      importance: 0.9,
+      source: 'agent',
+      tags: ['capability', 'meta', 'agentfs', 'sandbox'],
+    });
+  }
+
   console.log(`[Kronk] ✓ Agent initialized successfully`);
   console.log(`[Kronk] Run 'kronk status' to view your agent`);
 
@@ -225,6 +272,7 @@ how to accomplish tasks in specific domains (e.g., git operations, file manageme
     tools,
     journal,
     messages,
+    agentfs,
     paths,
   };
 }
@@ -232,18 +280,21 @@ how to accomplish tasks in specific domains (e.g., git operations, file manageme
 /**
  * Load an existing Kronk agent from a directory
  */
-export async function load(basePath?: string): Promise<KronkInstance> {
+export async function load(basePath?: string, options?: { noAgentfs?: boolean }): Promise<KronkInstance> {
   const kronkPath = getKronkPath(basePath);
+  const agentfsDir = join(kronkPath, 'agentfs');
   const paths = {
     root: kronkPath,
     db: join(kronkPath, 'kronk.db'),
     constitution: join(kronkPath, 'constitution.md'),
     config: join(kronkPath, 'config.json'),
     skills: join(kronkPath, 'skills'),
+    agentfs: agentfsDir,
   };
 
-  // Ensure skills directory exists (for older installations)
+  // Ensure skills and agentfs directories exist (for older installations)
   await mkdir(paths.skills, { recursive: true });
+  await mkdir(agentfsDir, { recursive: true });
 
   // Verify directory exists
   if (!(await pathExists(kronkPath))) {
@@ -270,6 +321,22 @@ export async function load(basePath?: string): Promise<KronkInstance> {
   const journal = new JournalManager(db);
   const messages = new MessageManager(db);
 
+  // Initialize AgentFS if enabled
+  const agentfsEnabled = config.agentfs?.enabled !== false && !options?.noAgentfs;
+  let agentfs: AgentFSManager | null = null;
+
+  if (agentfsEnabled) {
+    const agentfsDbPath = join(agentfsDir, `${config.name}.db`);
+    agentfs = new AgentFSManager({
+      enabled: true,
+      agentId: config.name,
+      dbPath: agentfsDbPath,
+      basePath: resolve(basePath ?? process.cwd()),
+      autoCommit: config.agentfs?.autoCommit,
+    });
+    await agentfs.initialize();
+  }
+
   return {
     config,
     db,
@@ -277,6 +344,7 @@ export async function load(basePath?: string): Promise<KronkInstance> {
     tools,
     journal,
     messages,
+    agentfs,
     paths,
   };
 }
@@ -527,6 +595,49 @@ Working with files and directories effectively.
 - Always verify paths before destructive operations
 - Use \`-i\` flag for interactive mode (confirms before overwrite)
 - Back up important files before modifying
+`,
+
+  'agentfs': `# AgentFS Skill
+
+Filesystem sandboxing with AgentFS. Your file operations go through a sandboxed overlay.
+
+## File Tools
+
+### Reading Files
+- Use the \`read_file\` tool to read files. Files are loaded from the real filesystem into the sandbox on first access.
+
+### Writing Files
+- Use the \`write_file\` tool to write files. Writes go to the sandbox delta layer, NOT the real filesystem.
+
+### Directory Operations
+- Use \`list_directory\` to see directory contents (merged view of real + sandbox).
+- Use \`make_directory\` to create directories in the sandbox.
+
+## Sandbox Behavior
+
+- All file writes are isolated in a SQLite-backed copy-on-write layer
+- The user's real files are never modified directly
+- Changes accumulate during the session
+- The user reviews and commits/discards changes at session end
+
+## Communicating with the User
+
+- When you make file changes, mention what files you've modified
+- When the session is ending, remind the user about pending changes
+- Use \`list_directory\` to verify the current state of files
+
+## Shell Commands
+
+Shell commands may also be sandboxed. File-modifying shell commands (like \`echo > file\`, \`sed -i\`, etc.)
+should be avoided in favor of the dedicated file tools when possible, as the file tools guarantee sandbox isolation.
+
+## Commands the User Can Run
+
+- \`kronk agentfs status\` — Check sandbox status
+- \`kronk agentfs list\` — View pending changes
+- \`kronk agentfs commit\` — Apply changes to real filesystem
+- \`kronk agentfs discard\` — Discard all changes
+- \`kronk agentfs reset\` — Reset the sandbox database
 `,
 
   'npm': `# NPM Skill

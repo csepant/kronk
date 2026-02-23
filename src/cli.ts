@@ -9,6 +9,7 @@ import { Command } from 'commander';
 import { render } from 'ink';
 import React from 'react';
 import { init, load, getStatus, updateConfig, loadConstitution, getKronkPath, isInitialized } from './init/index.js';
+import type { AgentFSManager } from './agentfs/manager.js';
 import { MEMORY_TIERS } from './db/schema.js';
 import { Agent, type LLMProvider } from './core/agent.js';
 import { OpenAIEmbedder, OllamaEmbedder } from './core/embedders.js';
@@ -131,6 +132,7 @@ program
   .option('-p, --provider <provider>', 'LLM provider (ollama, openai, anthropic)')
   .option('-f, --force', 'Overwrite existing installation')
   .option('--vector-search', 'Enable vector search with embeddings (requires embedding model)')
+  .option('--no-agentfs', 'Disable AgentFS filesystem sandboxing')
   .option('--no-interactive', 'Disable interactive wizard')
   .action(async (options) => {
     try {
@@ -151,6 +153,7 @@ program
             model: result.model,
             provider: result.provider,
             useVectorSearch: result.useVectorSearch,
+            agentfs: { enabled: result.agentfsEnabled },
           },
           force: result.force,
         });
@@ -158,6 +161,7 @@ program
         console.log(`\nProvider: ${result.provider}`);
         console.log(`Model: ${result.model}`);
         console.log(`Vector Search: ${result.useVectorSearch ? 'enabled' : 'disabled (text search only)'}`);
+        console.log(`AgentFS: ${result.agentfsEnabled ? 'enabled' : 'disabled'}`);
         return;
       }
 
@@ -171,6 +175,7 @@ program
       const model = options.model ?? providerModelDefaults[provider] ?? 'llama3.2';
       const name = options.name ?? 'kronk-agent';
       const useVectorSearch = options.vectorSearch ?? false;
+      const agentfsEnabled = options.agentfs !== false;
 
       await init(undefined, {
         config: {
@@ -178,6 +183,7 @@ program
           model,
           provider,
           useVectorSearch,
+          agentfs: { enabled: agentfsEnabled },
         },
         force: options.force,
       });
@@ -185,6 +191,7 @@ program
       console.log(`\nProvider: ${provider}`);
       console.log(`Model: ${model}`);
       console.log(`Vector Search: ${useVectorSearch ? 'enabled' : 'disabled (text search only)'}`);
+      console.log(`AgentFS: ${agentfsEnabled ? 'enabled' : 'disabled'}`);
 
       if (useVectorSearch) {
         console.log('\nNote: Vector search requires an embedding model.');
@@ -270,6 +277,7 @@ program
         console.log(`  Name: ${status.config.name}`);
         console.log(`  Model: ${status.config.model}`);
         console.log(`  Vector Search: ${status.config.useVectorSearch ? 'enabled' : 'disabled (text search)'}`);
+        console.log(`  AgentFS: ${status.config.agentfs?.enabled !== false ? 'enabled' : 'disabled'}`);
         console.log(`  Debug: ${status.config.debug}`);
       }
 
@@ -295,6 +303,7 @@ program
   .description('Start the Kronk daemon in the background')
   .option('--provider <provider>', 'LLM provider (ollama, openai, anthropic)')
   .option('--model <model>', 'Model to use')
+  .option('--no-agentfs', 'Disable AgentFS filesystem sandboxing')
   .option('--ws-port <port>', 'Enable WebSocket server on specified port')
   .option('--ws-host <host>', 'WebSocket hostname (default: localhost)')
   .option('--ws-origins <origins>', 'Comma-separated allowed CORS origins')
@@ -310,7 +319,8 @@ program
 
       console.log('Starting Kronk daemon...');
 
-      const instance = await load();
+      const noAgentfs = options.agentfs === false;
+      const instance = await load(undefined, { noAgentfs });
 
       // Override provider if specified
       if (options.provider) {
@@ -327,6 +337,9 @@ program
       console.log(`Using ${provider} as LLM provider`);
       if (!instance.config.useVectorSearch) {
         console.log('Vector search disabled (using text search)');
+      }
+      if (noAgentfs) {
+        console.log('AgentFS disabled');
       }
 
       // Build WebSocket config if --ws-port is provided
@@ -410,9 +423,11 @@ program
   .option('--provider <provider>', 'LLM provider (ollama, openai, anthropic)')
   .option('--model <model>', 'Model to use')
   .option('--allow-shell', 'Auto-approve shell commands without confirmation')
+  .option('--no-agentfs', 'Disable AgentFS filesystem sandboxing')
   .action(async (options) => {
     try {
-      const instance = await load();
+      const noAgentfs = options.agentfs === false;
+      const instance = await load(undefined, { noAgentfs });
 
       // Override provider if specified
       if (options.provider) {
@@ -456,7 +471,11 @@ program
       // Exit alternate screen buffer
       process.stdout.write('\x1b[?1049l');
 
+      // Check for pending AgentFS changes
+      await promptAgentFSChanges(instance.agentfs);
+
       queue.stop();
+      if (instance.agentfs) await instance.agentfs.shutdown();
       await instance.db.close();
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
@@ -471,6 +490,7 @@ program
   .option('--provider <provider>', 'LLM provider (ollama, openai, anthropic)')
   .option('--model <model>', 'Model to use')
   .option('--allow-shell', 'Auto-approve shell commands without confirmation')
+  .option('--no-agentfs', 'Disable AgentFS filesystem sandboxing')
   .action(async (options) => {
     try {
       const kronkPath = getKronkPath();
@@ -517,7 +537,8 @@ program
       } else {
         console.log('Daemon is not running. Starting embedded mode...\n');
 
-        const instance = await load();
+        const noAgentfs = options.agentfs === false;
+        const instance = await load(undefined, { noAgentfs });
 
         // Override provider if specified
         if (options.provider) {
@@ -559,6 +580,8 @@ program
           rl.question('> ', async (input) => {
             const trimmed = input.trim();
             if (trimmed === 'exit' || trimmed === 'quit') {
+              // Check for pending AgentFS changes
+              await promptAgentFSChanges(instance.agentfs);
               await agent.shutdown();
               rl.close();
               return;
@@ -1027,6 +1050,248 @@ program
         console.log('\nCurrent config:');
         console.log(JSON.stringify(status.config, null, 2));
       }
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+// ── AgentFS session-end helper ─────────────────────────────────────────────
+
+async function promptAgentFSChanges(agentfs: AgentFSManager | null): Promise<void> {
+  if (!agentfs?.isEnabled()) return;
+
+  const changes = agentfs.listChanges();
+  if (changes.length === 0) return;
+
+  console.log(`\n📁 AgentFS: ${changes.length} pending change(s):\n`);
+  for (const change of changes) {
+    const icon = change.type === 'created' ? '+' : change.type === 'modified' ? '~' : '-';
+    console.log(`  ${icon} ${change.path} (${change.type})`);
+  }
+  console.log('');
+
+  const readline = await import('node:readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  const answer = await new Promise<string>((resolve) => {
+    rl.question('Commit changes to real filesystem? [y/N/list] ', (ans) => {
+      rl.close();
+      resolve(ans.trim().toLowerCase());
+    });
+  });
+
+  if (answer === 'y' || answer === 'yes') {
+    const result = await agentfs.commitChanges();
+    console.log(`✓ Committed ${result.committed} file(s)`);
+    if (result.errors.length > 0) {
+      for (const err of result.errors) {
+        console.log(`  ✗ ${err.path}: ${err.error}`);
+      }
+    }
+  } else if (answer === 'list' || answer === 'l') {
+    for (const change of changes) {
+      console.log(`  ${change.type}: ${change.path}`);
+    }
+    console.log('\nChanges NOT committed. Run `kronk agentfs commit` to apply later.');
+  } else {
+    console.log('Changes NOT committed. Run `kronk agentfs commit` to apply later.');
+  }
+}
+
+// ── AgentFS subcommands ───────────────────────────────────────────────────
+
+const agentfsCmd = program.command('agentfs').description('AgentFS filesystem sandbox management');
+
+agentfsCmd
+  .command('status')
+  .description('Show sandbox status and pending change count')
+  .action(async () => {
+    try {
+      const instance = await load();
+      if (!instance.agentfs) {
+        console.log('AgentFS: disabled');
+        await instance.db.close();
+        return;
+      }
+
+      const changes = instance.agentfs.listChanges();
+      console.log('\n📁 AgentFS Status\n');
+      console.log(`  Enabled: ${instance.agentfs.isEnabled() ? 'yes' : 'no'}`);
+      console.log(`  Pending changes: ${changes.length}`);
+      console.log(`  Database: ${instance.paths.agentfs}`);
+      console.log('');
+
+      await instance.agentfs.shutdown();
+      await instance.db.close();
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+agentfsCmd
+  .command('list')
+  .description('List modified/created/deleted files in sandbox')
+  .action(async () => {
+    try {
+      const instance = await load();
+      if (!instance.agentfs) {
+        console.log('AgentFS is disabled.');
+        await instance.db.close();
+        return;
+      }
+
+      const changes = instance.agentfs.listChanges();
+      if (changes.length === 0) {
+        console.log('No pending changes in sandbox.');
+      } else {
+        console.log(`\n📁 Pending Changes (${changes.length})\n`);
+        for (const change of changes) {
+          const icon = change.type === 'created' ? '+' : change.type === 'modified' ? '~' : '-';
+          console.log(`  ${icon} ${change.path} (${change.type})`);
+        }
+        console.log('');
+      }
+
+      await instance.agentfs.shutdown();
+      await instance.db.close();
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+agentfsCmd
+  .command('commit')
+  .description('Apply sandbox changes to real filesystem')
+  .action(async () => {
+    try {
+      const instance = await load();
+      if (!instance.agentfs) {
+        console.log('AgentFS is disabled.');
+        await instance.db.close();
+        return;
+      }
+
+      const changes = instance.agentfs.listChanges();
+      if (changes.length === 0) {
+        console.log('No pending changes to commit.');
+        await instance.agentfs.shutdown();
+        await instance.db.close();
+        return;
+      }
+
+      console.log(`\nAbout to commit ${changes.length} change(s):\n`);
+      for (const change of changes) {
+        const icon = change.type === 'created' ? '+' : change.type === 'modified' ? '~' : '-';
+        console.log(`  ${icon} ${change.path} (${change.type})`);
+      }
+      console.log('');
+
+      const readline = await import('node:readline');
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>((resolve) => {
+        rl.question('Proceed? [y/N] ', (ans) => {
+          rl.close();
+          resolve(ans.trim().toLowerCase());
+        });
+      });
+
+      if (answer === 'y' || answer === 'yes') {
+        const result = await instance.agentfs.commitChanges();
+        console.log(`✓ Committed ${result.committed} file(s)`);
+        if (result.errors.length > 0) {
+          for (const err of result.errors) {
+            console.log(`  ✗ ${err.path}: ${err.error}`);
+          }
+        }
+      } else {
+        console.log('Commit cancelled.');
+      }
+
+      await instance.agentfs.shutdown();
+      await instance.db.close();
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+agentfsCmd
+  .command('discard')
+  .description('Discard all sandbox changes')
+  .action(async () => {
+    try {
+      const instance = await load();
+      if (!instance.agentfs) {
+        console.log('AgentFS is disabled.');
+        await instance.db.close();
+        return;
+      }
+
+      const changes = instance.agentfs.listChanges();
+      if (changes.length === 0) {
+        console.log('No pending changes to discard.');
+        await instance.agentfs.shutdown();
+        await instance.db.close();
+        return;
+      }
+
+      const readline = await import('node:readline');
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>((resolve) => {
+        rl.question(`Discard ${changes.length} pending change(s)? [y/N] `, (ans) => {
+          rl.close();
+          resolve(ans.trim().toLowerCase());
+        });
+      });
+
+      if (answer === 'y' || answer === 'yes') {
+        await instance.agentfs.discardChanges();
+        console.log('✓ All changes discarded');
+      } else {
+        console.log('Discard cancelled.');
+      }
+
+      await instance.agentfs.shutdown();
+      await instance.db.close();
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+agentfsCmd
+  .command('reset')
+  .description('Delete and recreate the AgentFS database')
+  .action(async () => {
+    try {
+      const instance = await load();
+      if (!instance.agentfs) {
+        console.log('AgentFS is disabled.');
+        await instance.db.close();
+        return;
+      }
+
+      const readline = await import('node:readline');
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>((resolve) => {
+        rl.question('Reset AgentFS database? This will discard ALL sandbox data. [y/N] ', (ans) => {
+          rl.close();
+          resolve(ans.trim().toLowerCase());
+        });
+      });
+
+      if (answer === 'y' || answer === 'yes') {
+        await instance.agentfs.discardChanges();
+        console.log('✓ AgentFS database reset');
+      } else {
+        console.log('Reset cancelled.');
+      }
+
+      await instance.agentfs.shutdown();
+      await instance.db.close();
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
       process.exit(1);

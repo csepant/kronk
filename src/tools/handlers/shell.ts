@@ -8,6 +8,7 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import type { ToolSchema, ToolHandler } from '../manager.js';
+import type { AgentFSManager } from '../../agentfs/manager.js';
 
 export const shellToolSchema: ToolSchema = {
   type: 'object',
@@ -45,15 +46,26 @@ const MAX_TIMEOUT = 300000; // 5 minutes
 const DEFAULT_TIMEOUT = 30000; // 30 seconds
 const MAX_OUTPUT_SIZE = 1024 * 1024; // 1MB
 
+/** Patterns of dangerous filesystem-modifying commands for deny-list fallback */
+const DANGEROUS_FS_PATTERNS = [
+  /\brm\s+(-[a-zA-Z]*f|-[a-zA-Z]*r|--force|--recursive)\b/,
+  /\brmdir\b/,
+  /\bmkfs\b/,
+  /\bdd\s+/,
+  /\bchmod\b.*\b\/\b/,
+  /\bchown\b.*\b\/\b/,
+];
+
 /**
- * Create a shell tool handler with confirmation support
+ * Create a shell tool handler with confirmation support and optional AgentFS sandboxing
  */
 export function createShellHandler(
   emitter: EventEmitter,
-  defaultCwd?: string
+  defaultCwd?: string,
+  agentfs?: AgentFSManager | null,
 ): ToolHandler {
   return async (params: Record<string, unknown>): Promise<ShellResult> => {
-    const command = params.command as string;
+    let command = params.command as string;
     const cwd = (params.cwd as string) || defaultCwd || process.cwd();
     const timeout = Math.min(
       (params.timeout as number) || DEFAULT_TIMEOUT,
@@ -81,6 +93,27 @@ export function createShellHandler(
         exitCode: -1,
         killed: false,
       };
+    }
+
+    // Apply AgentFS sandboxing if enabled
+    if (agentfs?.isEnabled()) {
+      const prefix = await agentfs.getShellPrefix();
+      if (prefix) {
+        // CLI available: prefix the command
+        command = `${prefix} ${command}`;
+      } else {
+        // CLI not available: warn about dangerous patterns
+        for (const pattern of DANGEROUS_FS_PATTERNS) {
+          if (pattern.test(command)) {
+            return {
+              stdout: '',
+              stderr: `[AgentFS] Command blocked: matches dangerous filesystem pattern. Use the dedicated file tools (read_file, write_file, etc.) for sandboxed file operations.`,
+              exitCode: -1,
+              killed: false,
+            };
+          }
+        }
+      }
     }
 
     return executeCommand(command, cwd, timeout);

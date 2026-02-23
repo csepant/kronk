@@ -61,3 +61,18 @@ export {
   type AskUserResult,
   type FormQuestion,
 } from './form.js';
+
+export {
+  readFileSchema,
+  createReadFileHandler,
+  writeFileSchema,
+  createWriteFileHandler,
+  listDirectorySchema,
+  createListDirectoryHandler,
+  makeDirectorySchema,
+  createMakeDirectoryHandler,
+  type ReadFileResult,
+  type WriteFileResult,
+  type ListDirectoryResult,
+  type MakeDirectoryResult,
+} from './files.js';

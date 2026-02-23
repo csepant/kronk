@@ -48,6 +48,7 @@
     "node-cron": "^3.0.3",
     "openai": "^4.70.0",
     "react": "^18.2.0",
+    "agentfs-sdk": "latest",
     "zod": "^3.23.0"
   },
   "devDependencies": {

@@ -131,6 +131,10 @@ export type { MemoryProps } from './ui/components/Memory.js';
 export { TaskQueue } from './ui/components/TaskQueue.js';
 export type { TaskQueueProps } from './ui/components/TaskQueue.js';
 
+// AgentFS
+export { AgentFSManager } from './agentfs/manager.js';
+export type { AgentFSConfig, FileChange, FileChangeType, CommitResult } from './agentfs/types.js';
+
 // Tool handler types
 export type { FormRequestEvent, AskUserResult, FormQuestion } from './tools/handlers/form.js';
 

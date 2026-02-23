@@ -12,6 +12,7 @@ export interface WizardResult {
   provider: string;
   model: string;
   useVectorSearch: boolean;
+  agentfsEnabled: boolean;
   force: boolean;
 }
 
@@ -149,6 +150,12 @@ export async function runInitWizard(existingInstall: boolean): Promise<WizardRes
     default: false,
   });
 
+  // ── AgentFS sandbox ───────────────────────────────────────────────────
+  const agentfsEnabled = await confirm({
+    message: 'Enable filesystem sandboxing (AgentFS)? Protects your files from accidental changes.',
+    default: true,
+  });
+
   // ── Summary ────────────────────────────────────────────────────────────
   console.log('');
   console.log('\x1b[1m  Configuration summary\x1b[0m');
@@ -156,6 +163,7 @@ export async function runInitWizard(existingInstall: boolean): Promise<WizardRes
   console.log(`  Provider:       ${provider}`);
   console.log(`  Model:          ${model}`);
   console.log(`  Vector search:  ${useVectorSearch ? 'enabled' : 'disabled'}`);
+  console.log(`  AgentFS:        ${agentfsEnabled ? 'enabled' : 'disabled'}`);
   if (force) {
     console.log('  Reinitialize:   yes');
   }
@@ -171,7 +179,7 @@ export async function runInitWizard(existingInstall: boolean): Promise<WizardRes
     process.exit(0);
   }
 
-  return { name, provider, model, useVectorSearch, force };
+  return { name, provider, model, useVectorSearch, agentfsEnabled, force };
 }
 
 // ---------------------------------------------------------------------------

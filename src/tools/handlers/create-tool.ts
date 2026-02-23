@@ -8,6 +8,7 @@
 import { EventEmitter } from 'node:events';
 import type { ToolSchema, ToolHandler, ToolsManager } from '../manager.js';
 import { createShellHandler } from './shell.js';
+import type { AgentFSManager } from '../../agentfs/manager.js';
 
 export const createToolToolSchema: ToolSchema = {
   type: 'object',
@@ -53,7 +54,8 @@ const JS_EXECUTION_TIMEOUT = 1000; // 1 second
  */
 export function createCreateToolHandler(
   toolsManager: ToolsManager,
-  emitter: EventEmitter
+  emitter: EventEmitter,
+  agentfs?: AgentFSManager | null,
 ): ToolHandler {
   return async (params: Record<string, unknown>): Promise<CreateToolResult> => {
     const name = params.name as string;
@@ -70,7 +72,7 @@ export function createCreateToolHandler(
     }
 
     // Create dynamic handler based on type
-    const handler = createDynamicHandler(handlerType, handlerSpec, emitter);
+    const handler = createDynamicHandler(handlerType, handlerSpec, emitter, agentfs);
 
     // Register in database with metadata
     const tool = await toolsManager.register({
@@ -103,11 +105,12 @@ export function createCreateToolHandler(
 export function createDynamicHandler(
   handlerType: HandlerType,
   handlerSpec: string,
-  emitter: EventEmitter
+  emitter: EventEmitter,
+  agentfs?: AgentFSManager | null,
 ): ToolHandler {
   switch (handlerType) {
     case 'shell':
-      return createShellTemplateHandler(handlerSpec, emitter);
+      return createShellTemplateHandler(handlerSpec, emitter, agentfs);
     case 'http':
       return createHttpHandler(handlerSpec);
     case 'javascript':
@@ -122,9 +125,10 @@ export function createDynamicHandler(
  */
 function createShellTemplateHandler(
   commandTemplate: string,
-  emitter: EventEmitter
+  emitter: EventEmitter,
+  agentfs?: AgentFSManager | null,
 ): ToolHandler {
-  const shellHandler = createShellHandler(emitter);
+  const shellHandler = createShellHandler(emitter, undefined, agentfs);
 
   return async (params: Record<string, unknown>): Promise<unknown> => {
     // Substitute ${params.field} with actual values
@@ -247,7 +251,8 @@ function createJavaScriptHandler(functionBody: string): ToolHandler {
  */
 export async function loadDynamicTools(
   toolsManager: ToolsManager,
-  emitter: EventEmitter
+  emitter: EventEmitter,
+  agentfs?: AgentFSManager | null,
 ): Promise<number> {
   const tools = await toolsManager.listAll();
   let count = 0;
@@ -264,7 +269,8 @@ export async function loadDynamicTools(
         const handler = createDynamicHandler(
           metadata.handlerType,
           metadata.handlerSpec,
-          emitter
+          emitter,
+          agentfs,
         );
         toolsManager.registerHandler(tool.name, handler);
         count++;
